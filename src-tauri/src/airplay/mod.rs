@@ -1,4 +1,5 @@
 pub mod discovery;
+pub mod h264;
 pub mod rtsp;
 pub mod rtp;
 

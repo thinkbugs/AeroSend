@@ -753,7 +753,7 @@ body {
 
 .stream-stats {
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
   gap: 12px;
 }
 
@@ -779,6 +779,40 @@ body {
   font-size: 16px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
+}
+
+.stream-target {
+  font-size: 13px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.stream-transport {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 13px;
+}
+
+.setting-warning {
+  padding: 10px 14px;
+  margin-bottom: 16px;
+  background: rgba(255, 59, 48, 0.12);
+  border: 1px solid rgba(255, 59, 48, 0.4);
+  border-radius: var(--radius-sm);
+  color: #ff6b61;
+  font-size: 13px;
+}
+
+.setting-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+  word-break: break-all;
 }
 
 /* ── Settings ────────────────────────────────────── */
@@ -895,6 +929,330 @@ body {
 .about-info .muted {
   color: var(--text-muted);
   font-size: 12px;
+}
+
+/* ── DLNA cast page ──────────────────────────────── */
+.cast-page {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  overflow-y: auto;
+}
+
+.cast-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.cast-head h1 {
+  font-size: 22px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.cast-layout {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  gap: 20px;
+  align-items: start;
+}
+
+.cast-renderers,
+.cast-panel {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+}
+
+.cast-renderers h2,
+.cast-panel h2,
+.cast-offered h2 {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  margin-bottom: 10px;
+}
+
+.renderer-row {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.renderer-pick {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  padding: 10px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  cursor: pointer;
+  text-align: left;
+  transition: all var(--transition);
+}
+
+.renderer-pick:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.renderer-pick.selected {
+  border-color: var(--accent);
+  background: rgba(0, 122, 255, 0.1);
+}
+
+.renderer-pick:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.renderer-name {
+  font-size: 13px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.renderer-detail {
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.renderer-badges {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.renderer-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: var(--bg-active);
+  color: var(--text-secondary);
+}
+
+.renderer-badge.ok {
+  background: rgba(52, 199, 89, 0.15);
+  color: var(--green);
+}
+
+.renderer-badge.no {
+  background: rgba(255, 59, 48, 0.15);
+  color: var(--red);
+}
+
+.renderer-badge.live {
+  background: rgba(0, 122, 255, 0.15);
+  color: var(--accent);
+}
+
+.renderer-forget {
+  flex: 0 0 26px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 15px;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.renderer-forget:hover {
+  border-color: var(--red);
+  color: var(--red);
+}
+
+.cast-add {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cast-add label,
+.cast-url label {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.cast-add-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+/* An input's placeholder gives it a min-content width, so `flex: 1` alone
+   cannot shrink it and the row overflows its card. */
+.cast-add-row .form-input {
+  min-width: 0;
+}
+
+.btn-secondary {
+  padding: 8px 14px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+}
+
+.btn-secondary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.cast-panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.cast-panel-head h2 {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+  text-transform: none;
+  letter-spacing: 0;
+  margin: 0;
+}
+
+.cast-now {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 14px;
+}
+
+.cast-now-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cast-state {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--bg-active);
+  color: var(--text-secondary);
+}
+
+.cast-state.playing {
+  background: rgba(52, 199, 89, 0.15);
+  color: var(--green);
+}
+
+.cast-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.cast-slider {
+  flex: 1;
+}
+
+.cast-time {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  min-width: 42px;
+}
+
+.cast-transport {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cast-volume {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.cast-volume input[type="range"] {
+  width: 110px;
+}
+
+input[type="range"].cast-slider,
+.cast-volume input[type="range"] {
+  accent-color: var(--accent);
+  height: 4px;
+}
+
+.cast-served {
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.cast-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.cast-actions .btn-primary {
+  padding: 8px 16px;
+}
+
+.cast-url {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.cast-offered {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.cast-offered-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+}
+
+.cast-offered-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
 }
 
 /* ── Scrollbar ───────────────────────────────────── */

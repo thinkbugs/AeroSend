@@ -8,16 +8,14 @@ fn test_monitor_size() {
     assert!(w > 0 && h > 0, "Monitor dimensions must be positive");
 }
 
+// One duplication per test process: DXGI rejects the second concurrent
+// CreateDuplicateOutput on the same output, so init and frame pulling share a
+// single capture object instead of racing as two tests.
 #[test]
-fn test_dxgi_init() {
+fn test_dxgi_capture() {
     let capture = ScreenCapture::new().expect("Failed to init DXGI capture");
     println!("DXGI capture: {}x{}", capture.width(), capture.height());
     assert!(capture.width() > 0 && capture.height() > 0);
-}
-
-#[test]
-fn test_frame_capture() {
-    let capture = ScreenCapture::new().expect("Failed to init DXGI capture");
     let mut frame_count = 0;
     let mut total_bytes = 0u64;
     let start = Instant::now();

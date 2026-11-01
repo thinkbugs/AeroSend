@@ -7,6 +7,12 @@ export default defineConfig({
   server: {
     port: 1420,
     strictPort: true,
+    watch: {
+      // Cargo rewrites src-tauri/target while `tauri dev` is running. Watching
+      // it makes vite crash with EBUSY on the half-written exe, which kills the
+      // whole dev loop.
+      ignored: ["**/src-tauri/target/**", "**/dist/**"],
+    },
   },
   envPrefix: ["VITE_", "TAURI_"],
   build: {

@@ -1,4 +1,12 @@
+//! RTP/RTCP packetization for H.264 (RFC 6184) and AAC-hbr.
+
+use crate::airplay::h264::Nal;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Leave room for IP+UDP+RTP headers on an Ethernet path.
+pub const RTP_MAX_PAYLOAD: usize = 1400;
+
+const NAL_TYPE_FU_A: u8 = 28;
 
 #[derive(Debug, Clone)]
 pub struct RtpPacketizer {
@@ -13,57 +21,56 @@ impl RtpPacketizer {
     pub fn new(payload_type: u8, clock_rate: u32) -> Self {
         Self {
             ssrc: rand::random(),
-            sequence_number: rand::random(),
-            timestamp: rand::random::<u32>() & 0xFFFF_FFFF,
+            sequence_number: rand::random::<u16>() & 0x3F_FF,
+            timestamp: rand::random::<u32>() & 0xFF_FFFF,
             clock_rate,
             payload_type,
         }
     }
 
-    pub fn packetize_h264(&mut self, nalu: &[u8], pts_ms: u64) -> Vec<u8> {
-        self.timestamp = ((pts_ms as f64 / 1000.0) * self.clock_rate as f64) as u32;
-        self.build_rtp_packet(nalu)
+    /// Converts one access unit into RTP packets sharing `timestamp`.
+    ///
+    /// The marker bit is set on the final packet so the receiver can submit the
+    /// frame for decoding.
+    pub fn packetize_h264(&mut self, nalus: &[Nal], timestamp: u32) -> Vec<Vec<u8>> {
+        self.timestamp = timestamp;
+        let mut payloads: Vec<Vec<u8>> = Vec::new();
+
+        for nal in nalus {
+            if nal.data.len() <= RTP_MAX_PAYLOAD {
+                payloads.push(nal.data.clone());
+            } else {
+                payloads.extend(fragment_a(nal));
+            }
+        }
+
+        let last = payloads.len() - 1;
+        payloads
+            .into_iter()
+            .enumerate()
+            .map(|(i, payload)| self.build_rtp_packet(&payload, i == last))
+            .collect()
     }
 
-    pub fn packetize_aac(&mut self, frame: &[u8], pts_ms: u64) -> Vec<u8> {
-        self.timestamp = ((pts_ms as f64 / 1000.0) * self.clock_rate as f64) as u32;
+    /// Packetizes one raw AAC access unit (no ADTS header) using AU-headers.
+    pub fn packetize_aac(&mut self, frame: &[u8], timestamp: u32) -> Vec<u8> {
+        self.timestamp = timestamp;
         let au_headers = build_aac_au_headers(frame.len());
         let mut payload = Vec::with_capacity(au_headers.len() + frame.len());
         payload.extend_from_slice(&au_headers);
         payload.extend_from_slice(frame);
-        self.build_rtp_packet(&payload)
+        self.build_rtp_packet(&payload, true)
     }
 
-    fn build_rtp_packet(&mut self, payload: &[u8]) -> Vec<u8> {
+    fn build_rtp_packet(&mut self, payload: &[u8], marker: bool) -> Vec<u8> {
         let mut packet = Vec::with_capacity(12 + payload.len());
-
-        // Byte 0: V=2, P=0, X=0, CC=0
-        packet.push(0x80);
-
-        // Byte 1: M=0, PT
-        let m_bit = 0u8;
-        packet.push((m_bit << 7) | (self.payload_type & 0x7F));
-
-        // Bytes 2-3: Sequence number (big-endian)
-        packet.push((self.sequence_number >> 8) as u8);
-        packet.push(self.sequence_number as u8);
+        packet.push(0x80); // V=2, P=0, X=0, CC=0
+        packet.push(if marker { 0x80 } else { 0 } | self.payload_type & 0x7F);
+        packet.extend_from_slice(&self.sequence_number.to_be_bytes());
         self.sequence_number = self.sequence_number.wrapping_add(1);
-
-        // Bytes 4-7: Timestamp (big-endian)
-        packet.push((self.timestamp >> 24) as u8);
-        packet.push((self.timestamp >> 16) as u8);
-        packet.push((self.timestamp >> 8) as u8);
-        packet.push(self.timestamp as u8);
-
-        // Bytes 8-11: SSRC (big-endian)
-        packet.push((self.ssrc >> 24) as u8);
-        packet.push((self.ssrc >> 16) as u8);
-        packet.push((self.ssrc >> 8) as u8);
-        packet.push(self.ssrc as u8);
-
-        // Payload
+        packet.extend_from_slice(&self.timestamp.to_be_bytes());
+        packet.extend_from_slice(&self.ssrc.to_be_bytes());
         packet.extend_from_slice(payload);
-
         packet
     }
 
@@ -78,81 +85,250 @@ impl RtpPacketizer {
     pub fn ssrc(&self) -> u32 {
         self.ssrc
     }
+
+    /// RTP clock ticks for a millisecond timestamp on this stream's clock.
+    pub fn clock_for_ms(&self, elapsed_ms: u64) -> u32 {
+        ((elapsed_ms as u64 * self.clock_rate as u64) / 1000) as u32
+    }
+}
+
+/// RFC 6184 FU-A fragmentation.
+fn fragment_a(nal: &Nal) -> Vec<Vec<u8>> {
+    let indicator = (nal.data[0] & 0x60) | NAL_TYPE_FU_A;
+    let nal_unit_type = nal.data[0] & 0x1F;
+    let payload = &nal.data[1..];
+    let chunk_size = RTP_MAX_PAYLOAD - 2;
+    let fragment_count = payload.len().div_ceil(chunk_size);
+
+    payload
+        .chunks(chunk_size)
+        .enumerate()
+        .map(|(i, chunk)| {
+            let mut header_byte = nal_unit_type;
+            if i == 0 {
+                header_byte |= 0x80; // S
+            }
+            if i == fragment_count - 1 {
+                header_byte |= 0x40; // E
+            }
+            let mut p = Vec::with_capacity(chunk.len() + 2);
+            p.push(indicator);
+            p.push(header_byte);
+            p.extend_from_slice(chunk);
+            p
+        })
+        .collect()
 }
 
 fn build_aac_au_headers(frame_len: usize) -> Vec<u8> {
-    // AU-headers-length (2 bytes) + AU header (2 bytes per AU)
-    let headers_length: u16 = 16; // 1 AU * 16 bits
+    // AU-headers-length in bits, then a single AU header: 13-bit size + 3-bit index.
+    let headers_length: u16 = 16;
     let mut headers = Vec::with_capacity(4);
-    headers.push((headers_length >> 8) as u8);
-    headers.push(headers_length as u8);
-    // AU header: 13 bits size + 3 bits index
+    headers.extend_from_slice(&headers_length.to_be_bytes());
     headers.push((frame_len >> 5) as u8);
     headers.push(((frame_len & 0x1F) << 3) as u8);
     headers
 }
 
+/// RFC 3550: NTP timestamp, seconds since 1900-01-01 with 32-bit fraction.
 pub fn current_nt_timestamp() -> u64 {
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
-    let secs = duration.as_secs();
-    let frac = duration.subsec_nanos() as u64;
-    ((secs + 2_208_988_800) << 32) | ((frac << 32) / 1_000_000_000)
+    let secs = duration.as_secs() + 2_208_988_800;
+    let frac = (duration.subsec_nanos() as u64) * 0x1_0000_0000 / 1_000_000_000;
+    (secs << 32) | frac
 }
 
 #[derive(Debug)]
 pub struct RtcpSenderReport {
-    pub ntp_timestamp: u64,
-    pub rtp_timestamp: u32,
-    pub packet_count: u32,
-    pub octet_count: u32,
+    pub ssrc: u32,
+    ntp_timestamp: u64,
+    rtp_timestamp: u32,
+    packet_count: u32,
+    payload_octet_count: u32,
 }
 
 impl RtcpSenderReport {
-    pub fn new() -> Self {
+    pub fn new(ssrc: u32) -> Self {
         Self {
+            ssrc,
             ntp_timestamp: current_nt_timestamp(),
             rtp_timestamp: 0,
             packet_count: 0,
-            octet_count: 0,
+            payload_octet_count: 0,
         }
     }
 
-    pub fn update(&mut self, rtp_ts: u32, packet_len: u32) {
-        self.ntp_timestamp = current_nt_timestamp();
+    /// Tracks one sent packet's RTP timestamp and payload size.
+    pub fn observe_packet(&mut self, rtp_ts: u32, payload_len: u32) {
         self.rtp_timestamp = rtp_ts;
-        self.packet_count += 1;
-        self.octet_count += packet_len;
+        self.packet_count = self.packet_count.wrapping_add(1);
+        self.payload_octet_count = self.payload_octet_count.wrapping_add(payload_len);
     }
 
-    pub fn serialize(&self, ssrc: u32) -> Vec<u8> {
+    /// Stamps the wall-clock counterpart of the last observed RTP timestamp.
+    pub fn mark_clock(&mut self) {
+        self.ntp_timestamp = current_nt_timestamp();
+    }
+
+    pub fn serialize(&self) -> Vec<u8> {
         let mut packet = Vec::with_capacity(28);
-
-        // V=2, P=0, RC=0, PT=200 (SR)
-        packet.push(0x80);
-        packet.push(200);
-
-        // Length = 6 (24 bytes / 4 - 1)
-        let length: u16 = 6;
-        packet.push((length >> 8) as u8);
-        packet.push(length as u8);
-
-        // SSRC
-        packet.extend_from_slice(&ssrc.to_be_bytes());
-
-        // NTP timestamp
+        packet.push(0x80); // V=2, P=0, RC=0
+        packet.push(200); // SR
+        packet.extend_from_slice(&6u16.to_be_bytes()); // (28-4)/4
+        packet.extend_from_slice(&self.ssrc.to_be_bytes());
         packet.extend_from_slice(&self.ntp_timestamp.to_be_bytes());
-
-        // RTP timestamp
         packet.extend_from_slice(&self.rtp_timestamp.to_be_bytes());
-
-        // Sender's packet count
         packet.extend_from_slice(&self.packet_count.to_be_bytes());
-
-        // Sender's octet count
-        packet.extend_from_slice(&self.octet_count.to_be_bytes());
-
+        packet.extend_from_slice(&self.payload_octet_count.to_be_bytes());
         packet
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::airplay::h264::NalType;
+
+    fn nal(ty: u8, len: usize) -> Nal {
+        let mut data = vec![ty];
+        data.extend((0..len).map(|i| (i % 253) as u8 + 1));
+        Nal { data }
+    }
+
+    #[test]
+    fn small_nals_use_single_packet_mode() {
+        let mut p = RtpPacketizer::new(96, 90000);
+        let nalus = vec![nal(0x67, 20), nal(0x68, 4), nal(0x65, 300)];
+        let packets = p.packetize_h264(&nalus, 1234);
+        assert_eq!(packets.len(), 3);
+
+        // header sanity on the first packet
+        assert_eq!(packets[0][0], 0x80);
+        assert_eq!(packets[0][1] & 0x7F, 96);
+        assert_eq!(&packets[0][4..8], &1234u32.to_be_bytes());
+        assert_eq!(&packets[0][8..12], &p.ssrc().to_be_bytes());
+
+        // only the last packet of the access unit carries the marker
+        assert_eq!(packets[0][1] & 0x80, 0);
+        assert_eq!(packets[1][1] & 0x80, 0);
+        assert_eq!(packets[2][1] & 0x80, 0x80);
+
+        // payload is the untouched NAL
+        assert_eq!(&packets[2][12..13], &[0x65]);
+    }
+
+    #[test]
+    fn sequence_numbers_increase_across_packets_and_calls() {
+        let mut p = RtpPacketizer::new(96, 90000);
+        let first = p.sequence_number();
+        let a = p.packetize_h264(&[nal(0x65, 2000)], 1);
+        let b = p.packetize_h264(&[nal(0x61, 10)], 2);
+        let used = a.len() + b.len();
+        let seq_of = |pkt: &Vec<u8>| u16::from_be_bytes([pkt[2], pkt[3]]);
+        assert_eq!(seq_of(&a[0]), first);
+        assert_eq!(seq_of(&b[0]), first.wrapping_add(a.len() as u16));
+        assert_eq!(p.sequence_number(), first.wrapping_add(used as u16));
+    }
+
+    #[test]
+    fn large_nal_is_fragmented_with_fu_a_start_and_end() {
+        let mut p = RtpPacketizer::new(96, 90000);
+        let big = nal(0x65, RTP_MAX_PAYLOAD * 3 + 77);
+        let packets = p.packetize_h264(&[big.clone()], 9_000);
+        assert!(packets.len() >= 4);
+
+        for (i, pkt) in packets.iter().enumerate() {
+            let payload = &pkt[12..];
+            let indicator = payload[0];
+            let fu_header = payload[1];
+            assert_eq!(indicator & 0x1F, NAL_TYPE_FU_A);
+            assert_eq!(indicator & 0x60, 0x60, "NRI must be preserved");
+            assert_eq!(fu_header & 0x1F, 5, "fu type carries the original nal type");
+            assert_eq!(fu_header & 0x80 != 0, i == 0, "S bit only on first");
+            assert_eq!(
+                fu_header & 0x40 != 0,
+                i == packets.len() - 1,
+                "E bit only on last"
+            );
+        }
+
+        // marker bit lands on the final fragment
+        assert_eq!(packets.last().unwrap()[1] & 0x80, 0x80);
+
+        // reassembling the fragments reproduces the original NAL byte-for-byte
+        let mut rebuilt = vec![big.data[0]];
+        for pkt in &packets {
+            rebuilt.extend_from_slice(&pkt[14..]);
+        }
+        assert_eq!(rebuilt, big.data);
+    }
+
+    #[test]
+    fn fragment_payload_never_exceeds_mtu() {
+        let mut p = RtpPacketizer::new(96, 90000);
+        let huge = nal(0x65, RTP_MAX_PAYLOAD * 20);
+        let packets = p.packetize_h264(&[huge], 0);
+        assert!(packets.iter().all(|pkt| pkt.len() <= 12 + RTP_MAX_PAYLOAD));
+    }
+
+    #[test]
+    fn aac_payload_has_thirteen_bit_au_size() {
+        let mut p = RtpPacketizer::new(97, 44100);
+        let frame = vec![0xAA; 200];
+        let pkt = p.packetize_aac(&frame, 500);
+        assert_eq!(&pkt[0..1], &[0x80]);
+        assert_eq!(pkt[1] & 0x7F, 97);
+        let payload = &pkt[12..];
+        let au_len_bits = u16::from_be_bytes([payload[0], payload[1]]);
+        assert_eq!(au_len_bits, 16);
+        let au_size = ((payload[2] as u16) << 5) | ((payload[3] as u16) >> 3);
+        assert_eq!(au_size, 200);
+        assert_eq!(&payload[4..], &frame[..]);
+    }
+
+    #[test]
+    fn aac_timestamp_uses_the_streams_clock() {
+        let mut p = RtpPacketizer::new(97, 44100);
+        let pkt = p.packetize_aac(&[1, 2, 3], p.clock_for_ms(1000));
+        assert_eq!(u32::from_be_bytes([pkt[4], pkt[5], pkt[6], pkt[7]]), 44100);
+    }
+
+    #[test]
+    fn sender_report_counts_payload_octets_not_packet_size() {
+        let mut sr = RtcpSenderReport::new(0x11223344);
+        sr.observe_packet(1000, 500);
+        sr.observe_packet(1001, 700);
+        sr.mark_clock();
+        let bytes = sr.serialize();
+        assert_eq!(bytes.len(), 28);
+        assert_eq!(bytes[1], 200);
+        assert_eq!(&bytes[4..8], &0x11223344u32.to_be_bytes());
+        assert_eq!(u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]), 1001);
+        assert_eq!(u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]), 2);
+        assert_eq!(u32::from_be_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]), 1200);
+    }
+
+    #[test]
+    fn ntp_timestamp_uses_the_1900_epoch() {
+        let nt = current_nt_timestamp();
+        let secs = (nt >> 32) as u64;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(secs > now + 2_208_988_000 && secs < now + 2_208_989_600);
+        assert!(nt as u32 > 0, "fraction must be populated");
+    }
+
+    #[test]
+    fn nal_type_decodes_the_five_bit_type() {
+        assert_eq!(NalType::from_header_byte(0x67), NalType::Sps);
+        assert_eq!(NalType::from_header_byte(0x68), NalType::Pps);
+        assert_eq!(NalType::from_header_byte(0x65), NalType::SliceIdr);
+        assert_eq!(NalType::from_header_byte(0x41), NalType::SliceNonIdr);
+        assert!(NalType::SliceIdr.is_slice());
+        assert!(!NalType::Sps.is_slice());
     }
 }

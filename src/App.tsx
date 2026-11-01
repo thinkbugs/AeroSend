@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import Sidebar from "./components/Sidebar";
 import Dashboard from "./pages/Dashboard";
+import CastView from "./pages/CastView";
 import StreamView from "./pages/StreamView";
 import Settings from "./pages/Settings";
 import type { Device, StreamStats, AppState } from "./types";
@@ -13,55 +14,79 @@ export default function App() {
   const [streamStats, setStreamStats] = useState<StreamStats | null>(null);
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [page, setPage] = useState<"dashboard" | "cast" | "settings">("dashboard");
 
   useEffect(() => {
-    startDiscovery();
+    invoke("start_discovery")
+      .then(() => setScanning(true))
+      .catch((e) => setError(`Discovery failed: ${e}`));
     return () => {
-      stopDiscovery();
+      invoke("stop_discovery").catch(() => undefined);
     };
   }, []);
 
-  async function startDiscovery() {
-    try {
-      setScanning(true);
-      await invoke("start_discovery");
-      pollDevices();
-    } catch (e) {
-      setError(`Discovery failed: ${e}`);
-      setScanning(false);
-    }
-  }
+  useEffect(() => {
+    if (!scanning) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const result = await invoke<Device[]>("get_devices");
+        if (!cancelled) setDevices(result);
+      } catch {
+        // A transient read failure just means the next tick retries.
+      }
+    };
+    tick();
+    const id = setInterval(tick, 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [scanning]);
 
-  async function stopDiscovery() {
-    try {
-      await invoke("stop_discovery");
-    } catch {
-      // ignore
-    }
+  // Stats only matter while a session is live; the backend reports the end of
+  // the session through `running`, which stops the loop and surfaces any error.
+  useEffect(() => {
+    if (state !== "streaming") return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const stats = await invoke<StreamStats>("get_stream_stats");
+        if (cancelled) return;
+        setStreamStats(stats);
+        if (!stats.running) {
+          setState("error");
+          setError(stats.error ?? "The stream ended.");
+        }
+      } catch {
+        // Ignore one failed read; the next tick retries.
+      }
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [state]);
+
+  async function rescan() {
     setScanning(false);
-  }
-
-  async function pollDevices() {
-    try {
-      const result = await invoke<Device[]>("get_devices");
-      setDevices(result);
-    } catch {
-      // ignore
-    }
-    if (scanning) {
-      setTimeout(pollDevices, 2000);
-    }
+    await invoke("stop_discovery").catch(() => undefined);
+    await invoke("start_discovery").catch(() => undefined);
+    setScanning(true);
   }
 
   async function connectToDevice(device: Device) {
     try {
       setError(null);
+      setPage("dashboard");
       await invoke("stream_start", { deviceId: device.id });
       setSelectedDevice(device);
       setState("streaming");
-      pollStats();
     } catch (e) {
       setError(`Connection failed: ${e}`);
+      setState("error");
     }
   }
 
@@ -76,19 +101,6 @@ export default function App() {
     }
   }
 
-  async function pollStats() {
-    if (state !== "streaming") return;
-    try {
-      const stats = await invoke<StreamStats>("get_stream_stats");
-      setStreamStats(stats);
-    } catch {
-      // ignore
-    }
-    setTimeout(pollStats, 1000);
-  }
-
-  const [page, setPage] = useState<"dashboard" | "settings">("dashboard");
-
   return (
     <div className="app-container">
       <Sidebar
@@ -98,7 +110,7 @@ export default function App() {
         scanning={scanning}
         onSelectDevice={connectToDevice}
         onDisconnect={disconnect}
-        onRescan={startDiscovery}
+        onRescan={rescan}
         page={page}
         onNavigate={setPage}
       />
@@ -111,14 +123,12 @@ export default function App() {
         )}
         {page === "settings" ? (
           <Settings />
+        ) : page === "cast" ? (
+          <CastView onError={setError} />
         ) : state === "streaming" && selectedDevice ? (
           <StreamView device={selectedDevice} stats={streamStats} />
         ) : (
-          <Dashboard
-            devices={devices}
-            onSelectDevice={connectToDevice}
-            onRescan={startDiscovery}
-          />
+          <Dashboard devices={devices} onSelectDevice={connectToDevice} onRescan={rescan} />
         )}
       </main>
     </div>
