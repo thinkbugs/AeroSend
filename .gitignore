@@ -1,0 +1,6 @@
+node_modules/
+dist/
+target/
+*.exe
+.DS_Store
+Thumbs.db
