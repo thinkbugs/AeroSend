@@ -1,21 +1,11 @@
-use anyhow::Result;
-use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Instant;
-use tokio::sync::Mutex;
-use tracing::{error, info, warn};
+pub mod session;
 
-use crate::airplay::rtsp::RtspClient;
-use crate::airplay::rtp::{RtpPacketizer, RtcpSenderReport};
-use crate::airplay::{StreamConfig, StreamStatistics};
-use crate::capture::encoder::{EncoderType, VideoEncoder};
-use crate::capture::screen::ScreenCapture;
+use session::StreamStats;
+use tracing::info;
 
 pub struct StreamManager {
     state: StreamState,
-    stats: StreamStatistics,
-    start_time: Option<Instant>,
+    stats: StreamStats,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -30,8 +20,7 @@ impl StreamManager {
     pub fn new() -> Self {
         Self {
             state: StreamState::Idle,
-            stats: StreamStatistics::default(),
-            start_time: None,
+            stats: StreamStats::default(),
         }
     }
 
@@ -39,39 +28,30 @@ impl StreamManager {
         &self.state
     }
 
-    pub fn stats(&self) -> &StreamStatistics {
+    pub fn stats(&self) -> &StreamStats {
         &self.stats
     }
 
-    pub fn set_state(&mut self, state: StreamState) {
-        info!("Stream state: {:?}", state);
-        self.state = state;
+    pub fn start_stream(&mut self, device_id: &str) {
+        info!("Starting stream to {}", device_id);
+        self.state = StreamState::Connecting(device_id.to_string());
     }
 
-    pub fn start_stream(&mut self, device_id: &str) -> Result<()> {
-        self.set_state(StreamState::Connecting(device_id.to_string()));
-        self.start_time = Some(Instant::now());
-        self.stats = StreamStatistics::default();
-        self.stats.codec = "H.264".to_string();
-        Ok(())
+    pub fn set_streaming(&mut self, device_id: &str) {
+        self.state = StreamState::Streaming(device_id.to_string());
     }
 
     pub fn stop_stream(&mut self) {
-        if let Some(start) = self.start_time {
-            self.stats.duration_secs = start.elapsed().as_secs();
-        }
-        self.set_state(StreamState::Idle);
-        self.start_time = None;
-        info!("Stream stopped. Total duration: {}s", self.stats.duration_secs);
+        self.state = StreamState::Idle;
+        info!("Stream stopped");
     }
 
-    pub fn update_stats(&mut self, fps: f64, bitrate: f64, latency_ms: f64) {
-        self.stats.fps = fps;
-        self.stats.bitrate = bitrate;
-        self.stats.latency_ms = latency_ms;
-        if let Some(start) = self.start_time {
-            self.stats.duration_secs = start.elapsed().as_secs();
-        }
+    pub fn set_error(&mut self, err: String) {
+        self.state = StreamState::Error(err);
+    }
+
+    pub fn update_stats(&mut self, stats: StreamStats) {
+        self.stats = stats;
     }
 
     pub fn is_streaming(&self) -> bool {

@@ -1,20 +1,22 @@
 use anyhow::{Context, Result};
-use tracing::{debug, error, info, warn};
+use tracing::{info, warn};
 use windows::core::Interface;
-use windows::Win32::Foundation::{BOOL, HANDLE, LPARAM, POINT, RECT};
+use windows::Win32::Foundation::POINT;
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, D3D11_CREATE_DEVICE_FLAG, D3D11_SDK_VERSION,
-    D3D11_USAGE_STAGING, D3D11_CPU_ACCESS_READ,
-    D3D11_TEXTURE2D_DESC,
+    D3D11CreateDevice, D3D11_CREATE_DEVICE_FLAG, D3D11_SDK_VERSION, D3D11_USAGE_STAGING,
+    D3D11_CPU_ACCESS_READ, D3D11_TEXTURE2D_DESC, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
+    ID3D11Device, ID3D11DeviceContext,
 };
 use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory1, IDXGIFactory1, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
+    IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
     DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_WAIT_TIMEOUT,
-    DXGI_OUTDUPL_DESC, DXGI_OUTDUPL_FRAME_INFO,
+    DXGI_OUTDUPL_DESC,
 };
-use windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC;
-use windows::Win32::Graphics::Gdi::{MonitorFromPoint, HMONITOR, MONITOR_DEFAULTTOPRIMARY, GetMonitorInfoW, MONITORINFOEXW};
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromPoint, MONITORINFOEXW, MONITOR_DEFAULTTOPRIMARY,
+};
 
 #[derive(Debug, Clone)]
 pub struct CapturedFrame {
@@ -26,6 +28,9 @@ pub struct CapturedFrame {
 
 pub struct ScreenCapture {
     duplication: IDXGIOutputDuplication,
+    #[allow(dead_code)]
+    device: ID3D11Device,
+    device_context: ID3D11DeviceContext,
     staging_texture: windows::Win32::Graphics::Direct3D11::ID3D11Texture2D,
     width: u32,
     height: u32,
@@ -33,87 +38,68 @@ pub struct ScreenCapture {
 
 impl ScreenCapture {
     pub fn new() -> Result<Self> {
-        info!("Initializing DXGI screen capture");
+        info!("Initializing DXGI Desktop Duplication");
 
         unsafe {
-            // Create D3D11 device
-            let mut device = None;
+            let mut device: Option<ID3D11Device> = None;
             let mut feature_level = Default::default();
-            let feature_levels = [
-                windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0,
-                windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_10_1,
-                windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_10_0,
-                windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_9_1,
-            ];
+            let mut context: Option<ID3D11DeviceContext> = None;
 
             D3D11CreateDevice(
                 None,
                 D3D_DRIVER_TYPE_HARDWARE,
                 None,
                 D3D11_CREATE_DEVICE_FLAG(0),
-                Some(&feature_levels),
+                None,
                 D3D11_SDK_VERSION,
                 Some(&mut device),
                 Some(&mut feature_level),
-                None,
+                Some(&mut context),
             )
             .context("Failed to create D3D11 device")?;
 
             let device = device.context("D3D11 device is None")?;
+            let device_context = context.context("D3D11 device context is None")?;
 
-            // Get DXGI device
             let dxgi_device: windows::Win32::Graphics::Dxgi::IDXGIDevice =
                 device.cast().context("Failed to get DXGI device")?;
 
-            // Get DXGI adapter
-            let adapter = dxgi_device
-                .GetAdapter()
-                .context("Failed to get DXGI adapter")?;
-
-            // Enumerate outputs to find the primary display
-            let output = adapter
-                .EnumOutputs(0)
-                .context("Failed to enumerate outputs")?;
-
-            // Cast to IDXGIOutput1 for DuplicateOutput
+            let adapter = dxgi_device.GetAdapter().context("Failed to get DXGI adapter")?;
+            let output = adapter.EnumOutputs(0).context("No display outputs found")?;
             let output1: IDXGIOutput1 = output.cast().context("Failed to cast to IDXGIOutput1")?;
 
-            // Create output duplication
             let duplication = output1
                 .DuplicateOutput(&dxgi_device)
                 .context("Failed to create output duplication")?;
 
-            // Get description
             let desc: DXGI_OUTDUPL_DESC = duplication.GetDesc();
-            let mode_desc = desc.ModeDesc;
-            let width = mode_desc.Width;
-            let height = mode_desc.Height;
+            let width = desc.ModeDesc.Width;
+            let height = desc.ModeDesc.Height;
+            info!("Screen capture initialized: {}x{}", width, height);
 
-            info!("Screen capture: {}x{}", width, height);
-
-            // Create staging texture for CPU readback
             let tex_desc = D3D11_TEXTURE2D_DESC {
                 Width: width,
                 Height: height,
                 MipLevels: 1,
                 ArraySize: 1,
-                Format: mode_desc.Format,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
                 SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
                 Usage: D3D11_USAGE_STAGING,
-                BindFlags: 0u32,
+                BindFlags: 0,
                 CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
-                MiscFlags: 0u32,
+                MiscFlags: 0,
             };
 
             let mut staging_texture = None;
             device
                 .CreateTexture2D(&tex_desc, None, Some(&mut staging_texture))
                 .context("Failed to create staging texture")?;
-
             let staging_texture = staging_texture.context("Staging texture is None")?;
 
             Ok(Self {
                 duplication,
+                device,
+                device_context,
                 staging_texture,
                 width,
                 height,
@@ -123,10 +109,12 @@ impl ScreenCapture {
 
     pub fn capture_frame(&self, timeout_ms: u32) -> Result<Option<CapturedFrame>> {
         unsafe {
-            let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
+            let mut frame_info = Default::default();
             let mut resource: Option<IDXGIResource> = None;
 
-            let hr = self.duplication.AcquireNextFrame(timeout_ms, &mut frame_info, &mut resource);
+            let hr = self
+                .duplication
+                .AcquireNextFrame(timeout_ms, &mut frame_info, &mut resource);
 
             if let Err(e) = hr {
                 let code = e.code();
@@ -135,27 +123,41 @@ impl ScreenCapture {
                 }
                 if code == DXGI_ERROR_ACCESS_LOST {
                     warn!("Desktop duplication access lost");
-                    return Err(anyhow::anyhow!("Access lost - desktop composition changed"));
+                    return Err(anyhow::anyhow!("Access lost"));
                 }
-                return Err(e).context("Failed to acquire frame");
+                return Err(e).context("AcquireNextFrame failed");
             }
 
             let resource = resource.context("No resource returned")?;
+            let desktop_texture: windows::Win32::Graphics::Direct3D11::ID3D11Texture2D =
+                resource.cast().context("Resource is not a Texture2D")?;
 
-            let _texture: windows::Win32::Graphics::Direct3D11::ID3D11Texture2D =
-                resource.cast().context("Failed to cast to texture2D")?;
+            self.device_context
+                .CopyResource(&self.staging_texture, &desktop_texture);
 
-            // Note: In a real implementation, we'd copy the texture to the staging texture first
-            // using ID3D11DeviceContext::CopyResource, then map the staging texture.
-            // For the initial scaffold, we return the frame dimensions.
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            self.device_context
+                .Map(&self.staging_texture, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .context("Failed to map staging texture")?;
 
+            let pitch = mapped.RowPitch;
+            let row_bytes = self.width * 4;
+            let mut data = Vec::with_capacity((row_bytes * self.height) as usize);
+
+            let src = mapped.pData as *const u8;
+            for row in 0..self.height {
+                let src_row = src.add((row * pitch) as usize);
+                data.extend_from_slice(std::slice::from_raw_parts(src_row, row_bytes as usize));
+            }
+
+            self.device_context.Unmap(&self.staging_texture, 0);
             let _ = self.duplication.ReleaseFrame();
 
             Ok(Some(CapturedFrame {
                 width: self.width,
                 height: self.height,
-                data: Vec::new(), // Will be populated with actual pixel data
-                pitch: self.width * 4,
+                data,
+                pitch: row_bytes,
             }))
         }
     }
@@ -185,9 +187,9 @@ pub fn get_primary_monitor_size() -> Result<(u32, u32)> {
         }
 
         let rect = info.monitorInfo.rcMonitor;
-        let width = (rect.right - rect.left) as u32;
-        let height = (rect.bottom - rect.top) as u32;
-
-        Ok((width, height))
+        Ok((
+            (rect.right - rect.left) as u32,
+            (rect.bottom - rect.top) as u32,
+        ))
     }
 }

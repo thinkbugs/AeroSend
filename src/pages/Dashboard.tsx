@@ -1,3 +1,5 @@
+import { useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import type { Device } from "../types";
 
 interface DashboardProps {
@@ -7,6 +9,30 @@ interface DashboardProps {
 }
 
 export default function Dashboard({ devices, onSelectDevice, onRescan }: DashboardProps) {
+  const [manualHost, setManualHost] = useState("");
+  const [manualPort, setManualPort] = useState("7000");
+  const [manualName, setManualName] = useState("");
+  const [adding, setAdding] = useState(false);
+
+  async function handleAddManual() {
+    if (!manualHost.trim()) return;
+    setAdding(true);
+    try {
+      await invoke("add_manual_device", {
+        host: manualHost.trim(),
+        port: parseInt(manualPort) || 7000,
+        name: manualName.trim() || undefined,
+      });
+      setManualHost("");
+      setManualPort("7000");
+      setManualName("");
+      onRescan();
+    } catch (e) {
+      console.error("Failed to add device:", e);
+    }
+    setAdding(false);
+  }
+
   return (
     <div className="dashboard">
       <div className="dashboard-hero">
@@ -79,6 +105,41 @@ export default function Dashboard({ devices, onSelectDevice, onRescan }: Dashboa
             <span className="stat-value">AirPlay</span>
             <span className="stat-label">Protocol</span>
           </div>
+        </div>
+      </div>
+
+      <div className="manual-device-section">
+        <h2>Add Device Manually</h2>
+        <p className="section-desc">Enter the IP address of an AirPlay receiver on your network.</p>
+        <div className="manual-device-form">
+          <input
+            type="text"
+            placeholder="IP Address (e.g. 192.168.1.100)"
+            value={manualHost}
+            onChange={(e) => setManualHost(e.target.value)}
+            className="form-input"
+          />
+          <input
+            type="number"
+            placeholder="Port"
+            value={manualPort}
+            onChange={(e) => setManualPort(e.target.value)}
+            className="form-input form-input-sm"
+          />
+          <input
+            type="text"
+            placeholder="Name (optional)"
+            value={manualName}
+            onChange={(e) => setManualName(e.target.value)}
+            className="form-input"
+          />
+          <button
+            className="btn-primary"
+            onClick={handleAddManual}
+            disabled={adding || !manualHost.trim()}
+          >
+            {adding ? "Adding..." : "Add"}
+          </button>
         </div>
       </div>
 

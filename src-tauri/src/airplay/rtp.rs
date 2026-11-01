@@ -1,5 +1,4 @@
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::debug;
 
 #[derive(Debug, Clone)]
 pub struct RtpPacketizer {
