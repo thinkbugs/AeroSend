@@ -20,6 +20,8 @@
 | 真实窗口 UI 走查（CDP 驱动 WebView2，两个文档） | 1 轮完整流程 | 通过 |
 | `npx tsc --noEmit` | — | 无错误（exit 0） |
 | `npm run build` | 双入口产物 | 通过，样式表完全隔离 |
+| `cargo test --release` | 101 单测 + 11 集测 | 通过（与 debug 同数，见第 9 节） |
+| `npm run tauri build` | MSI + NSIS 双安装包 | 通过（见第 9 节） |
 
 未通过 / 无法在本机验证的一项：**"墨迹随镜像到达接收端"这一条在本机无法证明**，原因是控制台处于锁屏状态，两种屏幕读取 API 都读不到任何窗口内容（第 8 节给出三组对照实测数据，不是推测）。
 
@@ -151,10 +153,56 @@ cargo test --test test_capture -- --nocapture    # 解锁控制台后 Non-zero p
 其它限制：
 
 - **未与真实 Apple TV / 商用电视验证**（沿用 Phase 4/5 的结论，本阶段不涉及新协议面）。
-- 单元测试跑在 debug profile；发布前建议补一轮 `--release`。
 - 本机未安装 `rustfmt`（`rustfmt.exe is not installed for the toolchain 'stable-x86_64-pc-windows-msvc'`），新代码按 `cargo check` 无 warning 与人工对齐换行处理，未跑 `cargo fmt`。
 
-## 9. 本轮发现并修掉的问题
+## 9. 发布构建与 release profile 复测
+
+Phase 4/5 报告留了一句"发布前建议补一轮 `--release`"，本轮补上。
+
+`cargo test --release`（同一台机器、同一份代码）：
+
+```text
+unittests src\lib.rs        running 101 tests → ok. 101 passed; 0 failed; 0 ignored (1.52s)
+test_audio.rs                running   1      → ok. 1 passed  (4.78s)
+test_capture.rs              running   2      → ok. 2 passed  (3.08s)
+test_interop_hub_dmr.rs      running   2      → ok. 0 passed; 2 ignored
+test_pipeline.rs             running   4      → ok. 4 passed  (2.19s)
+test_session_e2e.rs          running   1      → ok. 1 passed  (4.79s)
+test_upnp_e2e.rs             running   3      → ok. 3 passed  (1.03s)
+```
+
+即 **101 单测 + 11 集测通过 / 2 忽略 / 0 失败**，与 debug 逐条对齐（1.52 s vs 1.53 s、3.08 s vs 3.09 s 这种量级的差），没有"只在优化下才出现"的行为差异。采集用例在 release 下同样报 `Non-zero pixels: 0/8294400`，与第 8 节的锁屏结论一致——不是 profile 造成的。
+
+`npm run tauri build`（release 编译 3m 53s）产出两个安装包：
+
+```text
+src-tauri\target\release\bundle\msi\AeroSend_0.1.0_x64_en-US.msi    (4.80 MiB)
+src-tauri\target\release\bundle\nsis\AeroSend_0.1.0_x64-setup.exe   (3.28 MiB)
+```
+
+WiX 与 NSIS 工具链是构建时现拉的（`wix314-binaries.zip`，带 hash 校验），首次构建需要网络。安装包内嵌的图标就是第 10 节那张新做的 `design/app-icon.svg`。
+
+## 10. 图标：从占位图到可用的品牌图
+
+`design/app-icon.svg` 是母版（1024 方图、透明圆角底、蓝→紫渐变 + 白色"屏幕 + 两道上抛信号弧"字形），全套由
+
+```bash
+npx tauri icon design/app-icon.svg -o src-tauri/icons
+```
+
+重新生成。托盘用的是 `app.default_window_icon()`，也就是同一张内嵌图，不需要第二份资源。
+
+验证方式与结果：
+
+| 项 | 实测 |
+| --- | --- |
+| 产物尺寸 | `icon.ico` 22594 B、`icon.icns` 137928 B、`128x128.png` 5103 B、`32x32.png` 1217 B（替换前分别是 118 B / 851 B / 403 B / 96 B 的模板占位图） |
+| 128 px 目视 | 通过，圆角底 + 字形清晰，信号弧与屏幕互不粘连 |
+| 32 px 目视 | 通过，字形仍可辨（底座横条在 32 px 下开始发糊，是唯一妥协点） |
+| 透明通道 | 通过，圆角外为透明，`tauri icon` 生成的 ICO/ICNS 保留 alpha |
+| `cargo check` | 通过，无 warning（图标在 `build.rs` 阶段编进资源） |
+
+## 11. 本轮发现并修掉的问题
 
 | # | 现象 | 根因 | 处理 |
 | --- | --- | --- | --- |
@@ -167,17 +215,21 @@ cargo test --test test_capture -- --nocapture    # 解锁控制台后 Non-zero p
 | 7 | `cargo test` 报 `failed to remove target\debug\aerosend.exe (os error 5)`，杀掉 `aerosend` 又复活 | `node → cargo → cargo → aerosend` 这条 watcher 链会重启应用 | 一次性杀掉链上 4 个 PID，之后全套干净通过 |
 | 8 | `SetThreadExecutionState` 报 `EntryPointNotFoundException`；本轮 `GetProcessWindowStation` 同样踩反 | 前者在 kernel32，后者在 user32 | 各按真实导出模块声明；顺带记录：本轮三次窗口站探针都返回 `gle=87`，**窗口站不是"锁屏"这一结论的必要证据，已按"未查明"处理**，根因记录以第 8 节的三组对照实测为准 |
 | 9 | 探针脚本写 `redhwnd.txt` 报 `DirectoryNotFoundException` | PowerShell 5.1 按 ANSI 读无 BOM 的 `.ps1`，脚本里的中文 `$HOME` 路径字面量被解坏 | 脚本内不写中文字面量，改用 `$env:TEMP` + `Join-Path` |
+| 10 | 仓库里 14547 个跟踪文件有 14468 个是 `node_modules/` 与 `src-tauri/target/` | 首个提交 `Add source files and gitignore` 在忽略规则生效前批量加了进去；此后 `.gitignore` 对已跟踪文件不起作用 | `git rm -r --cached node_modules src-tauri/target`（只动索引，工作树不删），跟踪文件降到 80 个真实源文件 |
 
-## 10. 复现全套
+## 12. 复现全套
 
 ```bash
 cd D:\codeX\AeroSend\src-tauri
 cargo test                                            # 101 单测 + 11 集测通过 / 2 忽略
+cargo test --release                                  # 同一套，release profile
 cargo test --lib -- capture::screen                   # 采集输出选择的两条用例
 cargo test --test test_capture -- --nocapture          # 采集实测：本机 Non-zero 0.0%（见第 8 节）
 cd D:\codeX\AeroSend
 npx tsc --noEmit                                      # 前端类型，exit 0
 npm run build                                         # 双入口：index.html + annotate.html，两张独立样式表
+npm run tauri build                                   # MSI + NSIS（首次要联网拉 WiX/NSIS）
+npx tauri icon design/app-icon.svg -o src-tauri/icons  # 从母版重生成全套图标
 cargo test --test test_interop_hub_dmr -- --ignored --nocapture --test-threads=1   # 需先起 HORIZON 对端
 ```
 
