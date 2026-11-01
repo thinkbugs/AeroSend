@@ -55,6 +55,7 @@ URL 直投 ─► 不经本地服务器                                         
 ## 目录
 
 ```
+design/              图标源文件（app-icon.svg：1024 方图、透明圆角底）
 src/                 React 前端（两个文档：index.html 主控 / annotate.html 批注层，样式表互不包含）
   pages/Dashboard    设备列表 + 一键开始/停止投射
   pages/StreamView   会话状态、统计
@@ -80,6 +81,7 @@ npm install
 npm run tauri dev            # 开发（vite 已忽略 src-tauri/target，避免 EBUSY）
 npm run build                # 前端类型检查 + 打包
 npm run tauri build          # 发布安装包
+npx tauri icon design/app-icon.svg -o src-tauri/icons    # 改了图标源就重新生成全套（托盘用同一张内嵌图）
 ```
 
 需要 ffmpeg（`ffmpeg-sidecar` 会自动定位随包或系统 ffmpeg）。编码器可用性不是看 `ffmpeg -encoders` 列没列出来，而是真的喂一帧去打开它——本机就出现过列了 `h264_nvenc` 却在第一帧报 `Cannot load nvcuda.dll` 的情况；`Auto` 会选真正能打开的那个。
@@ -100,5 +102,4 @@ cargo test --test test_interop_hub_dmr -- --ignored --nocapture --test-threads=1
 
 - 尚未与真实 Apple TV / 第三方电视做过现场验证，当前对端为 HORIZON 接收端与协议级 fake 设备。
 - **批注的"墨迹是否出现在接收端画面上"还没能在本机证明**：控制台锁屏时，屏幕复制（DXGI）与 GDI 屏幕 DC 都读不到任何窗口内容——实测同一时刻一个真实全屏纯红窗口 `PrintWindow` 100% 红、`CopyFromScreen` 0% 红、`DuplicateOutput` 全帧 0% 非零。批注层自身的像素正确性是按窗口表面逐项量过的（见 Phase 6 报告），端到端那一段需在解锁的控制台或真机上复跑 `cargo test --test test_capture -- --nocapture`。
-- 应用图标仍是占位图。
 - 网络要求：镜像走组播发现，公司网络屏蔽 mDNS/SSDP 时使用手填地址入口。
