@@ -1,14 +1,17 @@
 import { useState, useEffect } from "react";
-import type { Device, AppState } from "../types";
+import type { AnnotationState, Device, AppState } from "../types";
 
 interface SidebarProps {
   devices: Device[];
   selectedDevice: Device | null;
   state: AppState;
   scanning: boolean;
+  annotation: AnnotationState;
   onSelectDevice: (device: Device) => void;
   onDisconnect: () => void;
   onRescan: () => void;
+  onToggleAnnotation: () => void;
+  onToggleAnnotationLock: () => void;
   page: "dashboard" | "cast" | "settings";
   onNavigate: (page: "dashboard" | "cast" | "settings") => void;
 }
@@ -18,9 +21,12 @@ export default function Sidebar({
   selectedDevice,
   state,
   scanning,
+  annotation,
   onSelectDevice,
   onDisconnect,
   onRescan,
+  onToggleAnnotation,
+  onToggleAnnotationLock,
   page,
   onNavigate,
 }: SidebarProps) {
@@ -134,6 +140,46 @@ export default function Sidebar({
             </button>
           ))}
         </div>
+      </div>
+
+      <div className="sidebar-section">
+        <div className="section-header">
+          <span>Annotation</span>
+        </div>
+        {annotation.open ? (
+          <div className="annotate-controls">
+            <button
+              className={`annotate-btn-side ${annotation.passthrough ? "locked" : ""}`}
+              onClick={onToggleAnnotationLock}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <rect x="4" y="10" width="16" height="10" rx="2" />
+                <path d={annotation.passthrough ? "M8 10V7a4 4 0 0 1 8 0" : "M8 10V7a4 4 0 0 1 8 0v3"} />
+              </svg>
+              <span>{annotation.passthrough ? "Resume drawing" : "Lock pointer"}</span>
+            </button>
+            <button className="annotate-btn-side ghost" onClick={onToggleAnnotation}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M18 6L6 18M6 6l12 12" />
+              </svg>
+              <span>Close overlay</span>
+            </button>
+          </div>
+        ) : (
+          <>
+            <button className="annotate-btn-side" onClick={onToggleAnnotation}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M12 19l7-7 3 3-7 7-3-3z" />
+                <path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z" />
+              </svg>
+              <span>Draw on screen</span>
+            </button>
+            <p className="annotate-side-note">
+              Ink sits on top of the desktop, so it leaves with the mirror and the
+              receiver sees it.
+            </p>
+          </>
+        )}
       </div>
 
       {state === "streaming" && (

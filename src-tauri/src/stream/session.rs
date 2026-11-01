@@ -78,8 +78,6 @@ pub struct StreamSettings {
     pub audio: bool,
     pub resolution: Resolution,
     pub encoder: EncoderType,
-    /// Kept so the annotation toggle round-trips until its phase lands.
-    pub annotation: bool,
 }
 
 impl Default for StreamSettings {
@@ -90,7 +88,6 @@ impl Default for StreamSettings {
             audio: true,
             resolution: Resolution::default(),
             encoder: EncoderType::Auto,
-            annotation: false,
         }
     }
 }

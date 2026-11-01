@@ -1255,6 +1255,50 @@ input[type="range"].cast-slider,
   min-width: 0;
 }
 
+/* ── Annotation (sidebar control) ──────────────────── */
+.annotate-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.annotate-btn-side {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background var(--transition), border-color var(--transition);
+}
+
+.annotate-btn-side:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-light);
+}
+
+.annotate-btn-side.ghost {
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.annotate-btn-side.locked {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.annotate-side-note {
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 /* ── Scrollbar ───────────────────────────────────── */
 ::-webkit-scrollbar {
   width: 6px;

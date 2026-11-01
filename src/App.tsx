@@ -5,7 +5,12 @@ import Dashboard from "./pages/Dashboard";
 import CastView from "./pages/CastView";
 import StreamView from "./pages/StreamView";
 import Settings from "./pages/Settings";
-import type { Device, StreamStats, AppState } from "./types";
+import type { AnnotationState, Device, StreamStats, AppState } from "./types";
+
+interface AnnotationStateInfo {
+  open: boolean;
+  passthrough: boolean;
+}
 
 export default function App() {
   const [state, setState] = useState<AppState>("idle");
@@ -15,6 +20,10 @@ export default function App() {
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState<"dashboard" | "cast" | "settings">("dashboard");
+  const [annotation, setAnnotation] = useState<AnnotationStateInfo>({
+    open: false,
+    passthrough: false,
+  });
 
   useEffect(() => {
     invoke("start_discovery")
@@ -24,6 +33,32 @@ export default function App() {
       invoke("stop_discovery").catch(() => undefined);
     };
   }, []);
+
+  // The overlay is a desktop window of its own: its toolbar can lock the pointer
+  // and the window can be closed outside this one. While it is open the sidebar
+  // reads the truth from the backend instead of trusting its last click.
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const next = await invoke<AnnotationState>("get_annotation_state");
+        if (!cancelled) setAnnotation(next);
+      } catch {
+        // One failed read; the next tick retries.
+      }
+    };
+    void tick();
+    if (!annotation.open) {
+      return () => {
+        cancelled = true;
+      };
+    }
+    const id = setInterval(tick, 1500);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [annotation.open]);
 
   useEffect(() => {
     if (!scanning) return;
@@ -101,6 +136,28 @@ export default function App() {
     }
   }
 
+  async function toggleAnnotation() {
+    try {
+      const next = annotation.open
+        ? await invoke<AnnotationState>("stop_annotation")
+        : await invoke<AnnotationState>("start_annotation");
+      setAnnotation(next);
+    } catch (e) {
+      setError(`Annotation failed: ${e}`);
+    }
+  }
+
+  async function toggleAnnotationLock() {
+    try {
+      const next = await invoke<AnnotationState>("set_annotation_passthrough", {
+        enabled: !annotation.passthrough,
+      });
+      setAnnotation(next);
+    } catch (e) {
+      setError(`Could not change the pointer lock: ${e}`);
+    }
+  }
+
   return (
     <div className="app-container">
       <Sidebar
@@ -108,9 +165,12 @@ export default function App() {
         selectedDevice={selectedDevice}
         state={state}
         scanning={scanning}
+        annotation={annotation}
         onSelectDevice={connectToDevice}
         onDisconnect={disconnect}
         onRescan={rescan}
+        onToggleAnnotation={toggleAnnotation}
+        onToggleAnnotationLock={toggleAnnotationLock}
         page={page}
         onNavigate={setPage}
       />

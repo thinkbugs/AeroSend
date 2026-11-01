@@ -148,23 +148,6 @@ export default function Settings() {
       </div>
 
       <div className="settings-section">
-        <h2>Annotation</h2>
-        <div className="setting-row">
-          <label htmlFor="annotation">Draw on the mirrored image (planned for a later build)</label>
-          <label className="toggle">
-            <input
-              id="annotation"
-              type="checkbox"
-              disabled={!settingsLoaded}
-              checked={settings.annotation}
-              onChange={(e) => updateSettings({ annotation: e.target.checked })}
-            />
-            <span className="toggle-slider" />
-          </label>
-        </div>
-      </div>
-
-      <div className="settings-section">
         <h2>About</h2>
         <div className="about-info">
           <p>AeroSend v0.1.0</p>

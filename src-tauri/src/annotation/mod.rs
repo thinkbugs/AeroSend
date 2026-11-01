@@ -1,81 +1,78 @@
-use serde::{Deserialize, Serialize};
+//! The annotation overlay.
+//!
+//! A second window: transparent, undecorated, always on top, covering the
+//! monitor we mirror. It is deliberately not composited into the stream by us —
+//! the screen duplicator already grabs whatever is on top of the desktop, so ink
+//! drawn here leaves through the same path as any other window and shows up on
+//! the receiver without a second encoder or a second protocol.
+//!
+//! The one thing only the desktop layer can do is hand input back to the
+//! applications underneath: `set_ignore_cursor_events` makes the whole window
+//! click-through, which is what "lock" means in the toolbar.
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AnnotationPoint {
-    pub x: f64,
-    pub y: f64,
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tracing::info;
+
+pub const OVERLAY_LABEL: &str = "annotate";
+
+/// Whether the overlay window exists right now.
+pub fn is_open(app: &AppHandle) -> bool {
+    app.get_webview_window(OVERLAY_LABEL).is_some()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum AnnotationTool {
-    Pen,
-    Eraser,
-    Text,
-    Clear,
+/// Create the overlay, or show the one already there.
+///
+/// Fullscreen rather than "primary monitor size at (0, 0)": the builder takes
+/// logical pixels and the capture path takes physical ones, and on a display at
+/// 150 % scaling those two disagree. Letting the window manager cover the
+/// monitor keeps the ink aligned with what the duplicator grabs.
+pub fn open(app: &AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(OVERLAY_LABEL) {
+        window.show().map_err(|e| e.to_string())?;
+        window.set_focus().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    let window = WebviewWindowBuilder::new(
+        app,
+        OVERLAY_LABEL,
+        WebviewUrl::App("annotate.html".into()),
+    )
+    .title("AeroSend Annotation")
+    .inner_size(1.0, 1.0)
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .resizable(false)
+    .maximizable(false)
+    .minimizable(false)
+    .closable(false)
+    .shadow(false)
+    .fullscreen(true)
+    .visible(true)
+    .build()
+    .map_err(|e| e.to_string())?;
+
+    info!("Annotation overlay opened: {}", window.label());
+    Ok(())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AnnotationStroke {
-    pub tool: AnnotationTool,
-    pub color: String,
-    pub width: f64,
-    pub points: Vec<AnnotationPoint>,
+/// Destroy the overlay. Ink is not kept: an annotation is a live gesture, and a
+/// half-finished drawing should not reappear over next week's deck.
+pub fn close(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(OVERLAY_LABEL) {
+        let _ = window.close();
+        info!("Annotation overlay closed");
+    }
 }
 
-pub struct AnnotationEngine {
-    strokes: Vec<AnnotationStroke>,
-    current_tool: AnnotationTool,
-    current_color: String,
-    current_width: f64,
-    enabled: bool,
-}
-
-impl AnnotationEngine {
-    pub fn new() -> Self {
-        Self {
-            strokes: Vec::new(),
-            current_tool: AnnotationTool::Pen,
-            current_color: "#ff3b30".to_string(),
-            current_width: 3.0,
-            enabled: false,
-        }
-    }
-
-    pub fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = enabled;
-    }
-
-    pub fn is_enabled(&self) -> bool {
-        self.enabled
-    }
-
-    pub fn set_tool(&mut self, tool: AnnotationTool) {
-        self.current_tool = tool;
-    }
-
-    pub fn set_color(&mut self, color: String) {
-        self.current_color = color;
-    }
-
-    pub fn set_width(&mut self, width: f64) {
-        self.current_width = width;
-    }
-
-    pub fn add_stroke(&mut self, stroke: AnnotationStroke) {
-        if self.enabled {
-            self.strokes.push(stroke);
-        }
-    }
-
-    pub fn clear(&mut self) {
-        self.strokes.clear();
-    }
-
-    pub fn undo(&mut self) {
-        self.strokes.pop();
-    }
-
-    pub fn strokes(&self) -> &[AnnotationStroke] {
-        &self.strokes
-    }
+/// Hand the mouse back to whatever is underneath the ink.
+pub fn set_passthrough(app: &AppHandle, enabled: bool) -> Result<(), String> {
+    let window = app
+        .get_webview_window(OVERLAY_LABEL)
+        .ok_or_else(|| "The annotation overlay is not open".to_string())?;
+    window
+        .set_ignore_cursor_events(enabled)
+        .map_err(|e| e.to_string())
 }

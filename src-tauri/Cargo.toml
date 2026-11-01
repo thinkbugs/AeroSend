@@ -40,6 +40,7 @@ mdns-sd = "0.11"
 bytes = "1"
 ffmpeg-sidecar = "2"
 rfd = "0.15"
+base64 = "0.22"
 rand = "0.8"
 chrono = "0.4"
 

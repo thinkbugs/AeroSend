@@ -294,7 +294,6 @@ fn session_delivers_a_complete_airplay_stream_over_loopback() {
         audio: true,
         resolution: Resolution::Native,
         encoder: EncoderType::X264,
-        annotation: false,
     };
 
     let thread_session = session.clone();

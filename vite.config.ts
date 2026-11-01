@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import path from "node:path";
 
 export default defineConfig({
   plugins: [react()],
@@ -19,5 +20,13 @@ export default defineConfig({
     target: ["es2021", "chrome105", "safari15"],
     minify: !process.env.TAURI_DEBUG ? "esbuild" : false,
     sourcemap: !!process.env.TAURI_DEBUG,
+    rollupOptions: {
+      input: {
+        main: path.join(import.meta.dirname, "index.html"),
+        // The annotation overlay is its own document: a transparent window must
+        // not inherit the app's opaque stylesheet.
+        annotate: path.join(import.meta.dirname, "annotate.html"),
+      },
+    },
   },
 });

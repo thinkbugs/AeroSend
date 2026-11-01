@@ -8,7 +8,6 @@ const DEFAULTS: StreamSettings = {
   audio: true,
   resolution: "native",
   encoder: "auto",
-  annotation: false,
 };
 
 interface AppStore {

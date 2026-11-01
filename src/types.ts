@@ -38,7 +38,6 @@ export interface StreamSettings {
   audio: boolean;
   resolution: Resolution;
   encoder: EncoderChoice;
-  annotation: boolean;
 }
 
 export type AppState = "idle" | "discovering" | "connecting" | "streaming" | "error";
@@ -78,4 +77,11 @@ export interface OfferedFile {
   url: string;
   mime: string;
   size: number;
+}
+
+/** The annotation overlay: whether it is on screen, and whether it lets the
+ *  mouse fall through to the desktop underneath. */
+export interface AnnotationState {
+  open: boolean;
+  passthrough: boolean;
 }
