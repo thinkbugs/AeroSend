@@ -1,6 +1,6 @@
 # AeroSend | windows airplay发送端
 
-Windows 上的专业级 AirPlay / DLNA **发送端**。独立项目，
+Windows 上的专业级 AirPlay / DLNA **发送端**。即是一个独立项目，也是 [HORIZON-Meeting-Hub](https://github.com/thinkbugs/HORIZON-Meeting-Hub) 会议白板投屏 的发送端。
 
 技术栈：Tauri 2 + React 18 + Vite 6 + Rust（采集/编码/协议全在 Rust 侧）。
 
