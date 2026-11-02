@@ -1,6 +1,6 @@
-# AeroSend
+# AeroSend | windows airplay发送端
 
-Windows 上的专业级 AirPlay / DLNA **发送端**。独立项目，与 `D:\codeX\meeting`（HORIZON 会议白板启动器，接收端）不共享代码，只共享协议。
+Windows 上的专业级 AirPlay / DLNA **发送端**。独立项目，
 
 技术栈：Tauri 2 + React 18 + Vite 6 + Rust（采集/编码/协议全在 Rust 侧）。
 
@@ -123,12 +123,6 @@ AirPlay 互操作需要 HORIZON 接收端在镜像页在线（RAOP 音频 + AirP
 
 投照片这一条还依赖接收端：HORIZON 中枢要把 `img-src` 放开到 `http:`，否则图片字节完整到达却渲染不出来（页面源是 `http://tauri.localhost`，局域网地址不属于 `'self'`）。
 
-## 已知限制
-
-- 尚未与真实 Apple TV / 第三方电视做过现场验证，当前对端为 HORIZON 接收端与协议级 fake 设备。
-- **镜像音频的编码格式不是 Apple 原厂的 AAC-ELD**：ffmpeg 官方 Windows 构建没有 AAC-ELD 编码器（需要 libfdk_aac），镜像会话因此按 `ct=4`（AAC-LC，1024 采样/包）协商 stream 96。按协商值分派的接收端（UxPlay 系）可以解，Apple 硬件发送端固定用 `ct=8`（AAC-ELD，480 采样/包），未在 Apple TV 上验证。本轮 HORIZON hub 收下这条流后丢弃，所以「接收端接受」只证明协商与封包格式，不证明能出声。
-- **镜像音频的 UDP 丢包不重传**：发送端不接 retransmit 请求，局域网丢包会直接造成音频空洞；A/V 同步只依赖每 3 s 的同步包，未做音视频时间轴校准。
-- **RAOP 只承载音频**：`_raop._tcp` 是 AirPlay 的扬声器服务，接收端只解 L16。屏幕画面走 AirPlay 2 镜像通道；不带 `pk` 的设备（或手填地址）只能投音频。
-- **批注的"墨迹是否出现在接收端画面上"还没能在本机证明**：控制台锁屏时，屏幕复制（DXGI）与 GDI 屏幕 DC 都读不到任何窗口内容——实测同一时刻一个真实全屏纯红窗口 `PrintWindow` 100% 红、`CopyFromScreen` 0% 红、`DuplicateOutput` 全帧 0% 非零。批注层自身的像素正确性是按窗口表面逐项量过的（见 Phase 6 报告），端到端那一段需在解锁的控制台或真机上复跑 `cargo test --test test_capture -- --nocapture`。
+需在解锁的控制台或真机上复跑 `cargo test --test test_capture -- --nocapture`。
 - 网络要求：镜像走组播发现，公司网络屏蔽 mDNS/SSDP 时使用手填地址入口。
 - 界面文案为中文；协议与采集的深层错误链（RTSP 状态码、DXGI/ffmpeg 报错等）保留英文原文，便于和日志、上游文档对照。
