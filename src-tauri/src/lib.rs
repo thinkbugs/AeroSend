@@ -23,7 +23,7 @@ use commands::{
     },
 };
 use std::sync::atomic::AtomicBool;
-use stream::{StreamSession, StreamSettings};
+use stream::{MirrorStream, StreamSession, StreamSettings};
 use std::sync::{Arc, Mutex};
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
@@ -31,6 +31,8 @@ use tauri::{Manager, WindowEvent};
 
 pub struct AppState {
     pub session: Arc<StreamSession>,
+    /// The AirPlay 2 screen path, for a receiver that advertises a display.
+    pub mirror: Arc<MirrorStream>,
     pub settings: Mutex<StreamSettings>,
     pub discovered_devices: Arc<Mutex<Vec<airplay::discovery::DiscoveredDevice>>>,
     pub caster: Arc<upnp::Caster>,
@@ -49,6 +51,7 @@ pub fn run_app() {
 
     let state = AppState {
         session: Arc::new(StreamSession::new()),
+        mirror: Arc::new(MirrorStream::new()),
         settings: Mutex::new(StreamSettings::default()),
         discovered_devices: Arc::new(Mutex::new(Vec::new())),
         caster: Arc::new(upnp::Caster::new()),
@@ -61,12 +64,12 @@ pub fn run_app() {
             let handle = app.handle().clone();
             *app.state::<AppState>().settings.lock().unwrap() = config::load(&handle);
 
-            let show = MenuItemBuilder::with_id("show", "Show AeroSend").build(app)?;
-            let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
+            let show = MenuItemBuilder::with_id("show", "显示 AeroSend").build(app)?;
+            let quit = MenuItemBuilder::with_id("quit", "退出").build(app)?;
             let menu = MenuBuilder::new(app).items(&[&show, &quit]).build()?;
 
             TrayIconBuilder::new()
-                .tooltip("AeroSend - AirPlay Sender")
+                .tooltip("AeroSend - AirPlay 投屏")
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "show" => {

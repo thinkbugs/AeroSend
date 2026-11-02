@@ -17,6 +17,22 @@ pub struct DiscoveredDevice {
     pub properties: HashMap<String, String>,
 }
 
+impl DiscoveredDevice {
+    /// Whether this advert offers a screen, not just a speaker.
+    ///
+    /// Mirroring is keyed on the receiver publishing its Ed25519 identity as
+    /// `pk`: the AirPlay 2 handshake signs a pair-verify challenge with it, so a
+    /// sender cannot establish a session with an advert that has no identity to
+    /// verify against. Speaker-only and manually entered devices have none.
+    pub fn mirrors_screen(&self) -> bool {
+        self.device_type == "airplay"
+            && self
+                .properties
+                .iter()
+                .any(|(key, value)| key.eq_ignore_ascii_case("pk") && !value.is_empty())
+    }
+}
+
 pub struct DiscoveryService {
     daemon: Arc<ServiceDaemon>,
     devices: Arc<Mutex<HashMap<String, DiscoveredDevice>>>,
@@ -142,5 +158,45 @@ fn service_info_to_device(info: &ServiceInfo, device_type: &str) -> DiscoveredDe
         port,
         device_type: device_type.to_string(),
         properties,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn device(device_type: &str, properties: &[(&str, &str)]) -> DiscoveredDevice {
+        DiscoveredDevice {
+            id: format!("192.168.1.5:7000:{device_type}"),
+            name: "Test".to_string(),
+            host: "192.168.1.5".to_string(),
+            port: 7000,
+            device_type: device_type.to_string(),
+            properties: properties
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn an_airplay_advert_with_an_identity_offers_a_screen() {
+        assert!(device("airplay", &[("pk", "AQAAAAoAAAAcAAAA")]).mirrors_screen());
+    }
+
+    #[test]
+    fn a_speaker_or_an_identity_less_advert_does_not() {
+        // Pair-verify signs a challenge with this key; without one there is
+        // nothing to verify, so the mirroring handshake cannot start.
+        assert!(!device("raop", &[("pk", "AQAAAAoAAAAcAAAA")]).mirrors_screen());
+        assert!(!device("airplay", &[("features", "0x1E5A7FFFF7,0x1E")]).mirrors_screen());
+        assert!(!device("airplay", &[("pk", "")]).mirrors_screen());
+        // A typed-in address has no TXT records at all.
+        assert!(!device("airplay", &[("manual", "true")]).mirrors_screen());
+    }
+
+    #[test]
+    fn the_identity_key_is_matched_whatever_case_the_advert_uses() {
+        assert!(device("airplay", &[("PK", "AQAAAAoAAAAcAAAA")]).mirrors_screen());
     }
 }

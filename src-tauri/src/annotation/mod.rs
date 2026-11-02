@@ -38,7 +38,7 @@ pub fn open(app: &AppHandle) -> Result<(), String> {
         OVERLAY_LABEL,
         WebviewUrl::App("annotate.html".into()),
     )
-    .title("AeroSend Annotation")
+    .title("AeroSend 批注")
     .inner_size(1.0, 1.0)
     .decorations(false)
     .transparent(true)
@@ -71,7 +71,7 @@ pub fn close(app: &AppHandle) {
 pub fn set_passthrough(app: &AppHandle, enabled: bool) -> Result<(), String> {
     let window = app
         .get_webview_window(OVERLAY_LABEL)
-        .ok_or_else(|| "The annotation overlay is not open".to_string())?;
+        .ok_or_else(|| "批注层尚未打开".to_string())?;
     window
         .set_ignore_cursor_events(enabled)
         .map_err(|e| e.to_string())

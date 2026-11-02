@@ -51,7 +51,7 @@ pub async fn start_discovery(state: State<'_, AppState>) -> Result<(), String> {
     }
 
     let mut svc = crate::airplay::discovery::DiscoveryService::new()
-        .map_err(|e| format!("Failed to create discovery service: {}", e))?;
+        .map_err(|e| format!("创建设备发现服务失败：{}", e))?;
 
     let mut rx = svc.start();
     *discovery = Some(svc);

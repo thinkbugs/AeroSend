@@ -43,6 +43,9 @@ rfd = "0.15"
 base64 = "0.22"
 rand = "0.8"
 chrono = "0.4"
+# Every AirPlay key derivation — pair-verify, the FairPlay stream keys — hashes
+# SHA-512 over a label and a secret, so this is on the mirroring hot path.
+sha2 = "0.10"
 
 [features]
 default = ["custom-protocol"]

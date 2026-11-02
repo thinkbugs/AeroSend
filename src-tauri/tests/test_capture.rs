@@ -13,7 +13,7 @@ fn test_monitor_size() {
 // single capture object instead of racing as two tests.
 #[test]
 fn test_dxgi_capture() {
-    let capture = ScreenCapture::new().expect("Failed to init DXGI capture");
+    let mut capture = ScreenCapture::new().expect("Failed to init DXGI capture");
     println!("DXGI capture: {}x{}", capture.width(), capture.height());
     assert!(capture.width() > 0 && capture.height() > 0);
     let mut frame_count = 0;

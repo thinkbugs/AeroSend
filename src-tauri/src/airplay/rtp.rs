@@ -53,13 +53,18 @@ impl RtpPacketizer {
     }
 
     /// Packetizes one raw AAC access unit (no ADTS header) using AU-headers.
-    pub fn packetize_aac(&mut self, frame: &[u8], timestamp: u32) -> Vec<u8> {
+    /// Raw PCM payload: no codec framing, because L16 has none. The receiver
+    /// reads fixed-size frames and advances its clock by their sample count.
+    pub fn packetize_pcm(&mut self, samples: &[u8], timestamp: u32) -> Vec<u8> {
         self.timestamp = timestamp;
-        let au_headers = build_aac_au_headers(frame.len());
-        let mut payload = Vec::with_capacity(au_headers.len() + frame.len());
-        payload.extend_from_slice(&au_headers);
-        payload.extend_from_slice(frame);
-        self.build_rtp_packet(&payload, true)
+        self.build_rtp_packet(samples, true)
+    }
+
+    /// One audio payload with the marker bit under the caller's control:
+    /// mirrored audio packets carry it clear, RAOP's L16 stream sets it.
+    pub fn packetize_audio(&mut self, payload: &[u8], timestamp: u32, marker: bool) -> Vec<u8> {
+        self.timestamp = timestamp;
+        self.build_rtp_packet(payload, marker)
     }
 
     fn build_rtp_packet(&mut self, payload: &[u8], marker: bool) -> Vec<u8> {
@@ -118,16 +123,6 @@ fn fragment_a(nal: &Nal) -> Vec<Vec<u8>> {
             p
         })
         .collect()
-}
-
-fn build_aac_au_headers(frame_len: usize) -> Vec<u8> {
-    // AU-headers-length in bits, then a single AU header: 13-bit size + 3-bit index.
-    let headers_length: u16 = 16;
-    let mut headers = Vec::with_capacity(4);
-    headers.extend_from_slice(&headers_length.to_be_bytes());
-    headers.push((frame_len >> 5) as u8);
-    headers.push(((frame_len & 0x1F) << 3) as u8);
-    headers
 }
 
 /// RFC 3550: NTP timestamp, seconds since 1900-01-01 with 32-bit fraction.
@@ -274,24 +269,28 @@ mod tests {
     }
 
     #[test]
-    fn aac_payload_has_thirteen_bit_au_size() {
-        let mut p = RtpPacketizer::new(97, 44100);
-        let frame = vec![0xAA; 200];
-        let pkt = p.packetize_aac(&frame, 500);
+    fn pcm_payload_is_sent_without_codec_framing() {
+        let mut p = RtpPacketizer::new(96, 44100);
+        let samples: Vec<u8> = (0..1408).map(|i| (i % 251) as u8).collect();
+        let pkt = p.packetize_pcm(&samples, 500);
         assert_eq!(&pkt[0..1], &[0x80]);
-        assert_eq!(pkt[1] & 0x7F, 97);
-        let payload = &pkt[12..];
-        let au_len_bits = u16::from_be_bytes([payload[0], payload[1]]);
-        assert_eq!(au_len_bits, 16);
-        let au_size = ((payload[2] as u16) << 5) | ((payload[3] as u16) >> 3);
-        assert_eq!(au_size, 200);
-        assert_eq!(&payload[4..], &frame[..]);
+        assert_eq!(pkt[1] & 0x7F, 96);
+        assert_eq!(&pkt[12..], &samples[..]);
+        assert_eq!(u32::from_be_bytes([pkt[4], pkt[5], pkt[6], pkt[7]]), 500);
     }
 
     #[test]
-    fn aac_timestamp_uses_the_streams_clock() {
-        let mut p = RtpPacketizer::new(97, 44100);
-        let pkt = p.packetize_aac(&[1, 2, 3], p.clock_for_ms(1000));
+    fn an_audio_packet_can_carry_the_marker_clear() {
+        let mut p = RtpPacketizer::new(96, 44100);
+        let pkt = p.packetize_audio(&[1, 2, 3], 7, false);
+        assert_eq!(pkt[1], 0x60, "mirrored audio is payload type 96, marker 0");
+        assert_eq!(&pkt[12..], &[1, 2, 3]);
+    }
+
+    #[test]
+    fn a_pcm_timestamp_uses_the_streams_clock() {
+        let mut p = RtpPacketizer::new(96, 44100);
+        let pkt = p.packetize_pcm(&[1, 2, 3], p.clock_for_ms(1000));
         assert_eq!(u32::from_be_bytes([pkt[4], pkt[5], pkt[6], pkt[7]]), 44100);
     }
 

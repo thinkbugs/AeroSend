@@ -67,7 +67,7 @@ pub async fn set_annotation_passthrough(
     enabled: bool,
 ) -> Result<AnnotationState, String> {
     if !annotation::is_open(&app) {
-        return Err("The annotation overlay is not open".to_string());
+        return Err("批注层尚未打开".to_string());
     }
     annotation::set_passthrough(&app, enabled)?;
     state
@@ -87,19 +87,19 @@ pub async fn save_annotation_png(png_base64: String) -> Result<Option<String>, S
         &base64::engine::general_purpose::STANDARD,
         png_base64.trim(),
     )
-    .map_err(|e| format!("The canvas image could not be read: {e}"))?;
+    .map_err(|e| format!("无法读取画布图像：{e}"))?;
 
     let written = tokio::task::spawn_blocking(move || -> Result<Option<String>, String> {
         let path = match rfd::FileDialog::new()
-            .set_title("Save the annotation as a PNG")
+            .set_title("将批注保存为 PNG")
             .set_file_name("aerosend-annotation.png")
-            .add_filter("PNG image", &["png"])
+            .add_filter("PNG 图片", &["png"])
             .save_file()
         {
             Some(path) => path,
             None => return Ok(None),
         };
-        std::fs::write(&path, &bytes).map_err(|e| format!("Writing {}: {e}", path.display()))?;
+        std::fs::write(&path, &bytes).map_err(|e| format!("写入 {} 失败：{e}", path.display()))?;
         Ok(Some(path.to_string_lossy().into_owned()))
     })
     .await

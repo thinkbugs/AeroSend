@@ -1,5 +1,14 @@
+pub mod aes;
+pub mod control;
 pub mod discovery;
+pub mod fairplay;
+pub mod fairplay_tables;
 pub mod h264;
+pub mod handshake;
+pub mod mirror;
+pub mod nacl;
+pub mod pairing;
+pub mod plist;
 pub mod rtsp;
 pub mod rtp;
 

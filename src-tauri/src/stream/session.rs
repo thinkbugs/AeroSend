@@ -1,41 +1,46 @@
-//! Live AirPlay mirroring session: capture → encode → packetize → RTP.
+//! Live RAOP audio session: WASAPI loopback → s16be → L16 RTP.
 //!
-//! Video and audio run as independent pumps that share one RTSP session. Both
-//! derive RTP timestamps from the same monotonic clock started at `RECORD`, so
-//! the receiver can pair them through their RTCP sender reports.
+//! `_raop._tcp` is AirPlay's speaker service. Its ANNOUNCE accepts raw L16 PCM
+//! and its SETUP names one audio socket, so this session carries audio and
+//! nothing else; screen mirroring is a different service and lives in
+//! [`crate::stream::mirror`].
+//!
+//! The receiver acts on the port SETUP answers with, not on the `m=audio` port
+//! in the SDP, and it requires the sender to name its control and timing ports
+//! or it refuses the transport outright.
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, SyncSender};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
-use crate::airplay::h264::{AccessUnitReader, Nal};
 use crate::airplay::rtp::{RtcpSenderReport, RtpPacketizer};
-use crate::capture::adts::{AdtsParser, AdtsFrame};
 use crate::capture::audio::AudioCapture;
 use crate::capture::audio_encoder::AudioEncoder;
-use crate::capture::encoder::{EncoderType, VideoEncoder};
-use crate::capture::screen::ScreenCapture;
+use crate::capture::encoder::EncoderType;
 
-pub const VIDEO_PAYLOAD_TYPE: u8 = 96;
-pub const AUDIO_PAYLOAD_TYPE: u8 = 106;
-pub const VIDEO_CLOCK: u32 = 90_000;
+/// RAOP announces L16 as payload type 96; the payload type is not what tells
+/// it apart from other media, the socket and the SDP do.
+pub const AUDIO_PAYLOAD_TYPE: u8 = 96;
 pub const AUDIO_CLOCK: u32 = 44_100;
-const AUDIO_BITRATE: u32 = 128_000;
-/// Frames allowed between capture and encoder output: the pictures the encoder
-/// still holds plus the one the access-unit grouper keeps back. Below the
-/// encoder's own fill the gate would starve it and nothing would ever come out;
-/// above it the viewer is watching history. Six frames is ~200ms at 30fps.
-const MAX_BACKLOG_FRAMES: usize = 6;
+/// Frames per RAOP audio packet. A receiver that is sent no `fmtp` still
+/// assumes 352, so the packets and that default have to agree.
+const L16_FRAMES_PER_PACKET: usize = 352;
+const L16_CHANNELS: usize = 2;
+/// 16-bit samples, two channels, 352 frames.
+const L16_PACKET_BYTES: usize = L16_FRAMES_PER_PACKET * L16_CHANNELS * 2;
 
 /// Encoded height the user asks for, resolved against the real screen.
+///
+/// RAOP is audio only, so this session ignores it; the mirroring session does
+/// not, and the setting is shared by both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Resolution {
     #[serde(rename = "native")]
@@ -97,15 +102,24 @@ pub struct StreamStats {
     pub frames_captured: u64,
     /// Capture ticks skipped because the encoder had not drained its backlog.
     pub frames_dropped: u64,
+    /// Pictures refused by the mirroring socket because the receiver had not
+    /// taken what was already queued. A different failure from `frames_dropped`,
+    /// which is local: this one says the network or the receiver is behind.
+    pub frames_stalled: u64,
     pub access_units_sent: u64,
+    /// Audio sample frames sent: 352 per RAOP L16 packet, 1024 per mirrored
+    /// AAC-LC packet.
     pub audio_frames_sent: u64,
+    /// Audio payload bytes, kept apart from `bytes_sent` so the video bitrate
+    /// readout is not diluted by the audio stream.
+    pub audio_bytes_sent: u64,
     pub bytes_sent: u64,
     pub rtp_packets_sent: u64,
     pub fps: f64,
     pub bitrate_mbps: f64,
     /// Capture-to-last-packet delay on the video path.
     pub latency_ms: f64,
-    /// Geometry actually captured, e.g. `1920x1080`.
+    /// Geometry actually captured, e.g. `1920x1080`; empty for audio sessions.
     pub resolution: String,
     /// Why the session ended, when it ended badly.
     pub error: Option<String>,
@@ -116,18 +130,24 @@ pub struct StreamSession {
     stats: Arc<Mutex<StreamStats>>,
 }
 
-/// One media stream's RTP data and RTCP control sockets.
+/// The sender's RTP and RTCP sockets plus a timing port the receiver insists on
+/// being named even though this sender never runs a timing exchange.
 struct Endpoint {
     rtp: UdpSocket,
     rtcp: UdpSocket,
+    _timing: UdpSocket,
     rtp_port: u16,
+    timing_port: u16,
 }
 
 struct Handshake {
-    video_server_port: u16,
-    audio_server_port: u16,
+    /// Where the receiver wants RTP audio.
+    server_port: u16,
+    /// Where the receiver wants our RTCP sender reports; RAOP does not have to
+    /// use `server_port + 1`, so the reply names it.
+    control_port: u16,
     session_id: String,
-    /// The RTSP control connection stays open for the whole session.
+    /// The RTSP connection stays open for the whole session.
     control: TcpStream,
     cseq: u32,
 }
@@ -160,8 +180,19 @@ fn bind_endpoint() -> Result<Endpoint> {
     loop {
         let rtp = UdpSocket::bind(("0.0.0.0", port));
         let rtcp = UdpSocket::bind(("0.0.0.0", port + 1));
-        if let (Ok(rtp), Ok(rtcp)) = (rtp, rtcp) {
-            return Ok(Endpoint { rtp, rtcp, rtp_port: port });
+        let timing = UdpSocket::bind("0.0.0.0:0");
+        if let (Ok(rtp), Ok(rtcp), Ok(timing)) = (rtp, rtcp, timing) {
+            let timing_port = timing
+                .local_addr()
+                .context("Failed to read the timing port")?
+                .port();
+            return Ok(Endpoint {
+                rtp,
+                rtcp,
+                _timing: timing,
+                rtp_port: port,
+                timing_port,
+            });
         }
         port = match port.checked_add(2) {
             // Wrap back into the dynamic range if we run off the end.
@@ -169,6 +200,12 @@ fn bind_endpoint() -> Result<Endpoint> {
             Some(p) => p,
             None => bail!("ran out of even RTP ports"),
         };
+    }
+}
+
+impl Default for StreamSession {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -189,7 +226,7 @@ impl StreamSession {
     }
 
     pub fn stop(&self) {
-        info!("Stopping stream session");
+        info!("Stopping RAOP session");
         self.running.store(false, Ordering::SeqCst);
     }
 
@@ -198,7 +235,7 @@ impl StreamSession {
         let result = self.run(host, port, settings);
         if let Err(e) = &result {
             let text = format!("{e:#}");
-            error!("Stream session failed: {text}");
+            error!("RAOP session failed: {text}");
             self.stats.lock().unwrap().error = Some(text);
         }
         self.running.store(false, Ordering::SeqCst);
@@ -206,459 +243,241 @@ impl StreamSession {
     }
 
     fn run(&self, host: &str, port: u16, settings: &StreamSettings) -> Result<()> {
-        let StreamSettings {
-            fps,
-            bitrate,
-            audio,
-            resolution,
-            encoder,
-            ..
-        } = *settings;
-        info!("Starting stream to {host}:{port} at {fps}fps / {bitrate}bps (audio={audio})");
         self.running.store(true, Ordering::SeqCst);
         *self.stats.lock().unwrap() = StreamStats::default();
+
+        if !settings.audio {
+            bail!(
+                "RAOP is the speaker transport and carries audio only; \
+                 enable system audio in Settings to cast to this device"
+            );
+        }
+
+        info!("Starting RAOP audio to {host}:{port}");
         let started = Instant::now();
-
-        // Capture first: the SDP must advertise the geometry actually sent,
-        // so the negotiated framesize comes from DXGI rather than the caller.
-        let capture = ScreenCapture::new().context("Failed to init screen capture")?;
-        let (screen_w, screen_h) = (capture.width(), capture.height());
-        let (width, height) = resolution.target(screen_w, screen_h);
-        info!("Screen capture {screen_w}x{screen_h}, encoding {width}x{height}");
-        self.stats.lock().unwrap().resolution = format!("{width}x{height}");
-
-        let video = bind_endpoint()?;
-        let audio = if audio { Some(bind_endpoint()?) } else { None };
-
-        let handshake = rtsp_handshake(host, port, &video, audio.as_ref(), width, height, fps)
+        let endpoint = bind_endpoint()?;
+        let rtp = RtpPacketizer::new(AUDIO_PAYLOAD_TYPE, AUDIO_CLOCK);
+        let handshake = rtsp_handshake(host, port, &endpoint, rtp.sequence_number())
             .with_context(|| format!("RTSP handshake with {host}:{port} failed"))?;
         info!(
-            "RTSP negotiated: video port {}, audio port {}, session {}",
-            handshake.video_server_port, handshake.audio_server_port, handshake.session_id
+            "RAOP negotiated: audio port {}, control port {}, session {}",
+            handshake.server_port, handshake.control_port, handshake.session_id
         );
 
         // An unconnected UDP socket cannot `send`; the negotiated receiver
         // ports only exist after the handshake, so the targets are set here.
-        let video_target = format!("{host}:{}", handshake.video_server_port);
-        video
+        let audio_target = format!("{host}:{}", handshake.server_port);
+        endpoint
             .rtp
-            .connect(&video_target)
-            .with_context(|| format!("Failed to connect video RTP to {video_target}"))?;
-        let _ = video
+            .connect(&audio_target)
+            .with_context(|| format!("Failed to connect audio RTP to {audio_target}"))?;
+        let control_target = format!("{host}:{}", handshake.control_port);
+        endpoint
             .rtcp
-            .connect(format!("{host}:{}", handshake.video_server_port + 1));
+            .connect(&control_target)
+            .with_context(|| format!("Failed to connect audio RTCP to {control_target}"))?;
 
-        let mut encoder =
-            VideoEncoder::new(screen_w, screen_h, width, height, fps, bitrate, encoder);
-        encoder.start().context("Failed to start video encoder")?;
-        let encoder_stdout = encoder
-            .take_stdout()
-            .context("Video encoder has no stdout")?;
+        let audio = spawn_audio(endpoint, rtp, &self.running, self.stats.clone());
 
-        let running = self.running.clone();
-        let stats = self.stats.clone();
-        let clock: CaptureClock = Arc::new(Mutex::new(VecDeque::new()));
-
-        let (au_tx, au_rx) = mpsc::sync_channel::<AccessUnit>(4);
-        let mut threads = Vec::new();
-
-        threads.push({
-            let running = running.clone();
-            let clock = clock.clone();
-            std::thread::spawn(move || {
-                read_access_units(encoder_stdout, &running, &au_tx, &clock);
-                info!("Video encoder reader exited");
-            })
-        });
-
-        threads.push({
-            let running = running.clone();
-            let stats = stats.clone();
-            std::thread::spawn(move || {
-                send_video(video, &au_rx, &running, &stats, started);
-            })
-        });
-
-        let audio_handle =
-            audio.map(|endpoint| spawn_audio(endpoint, host, handshake.audio_server_port, &running, stats.clone()));
-
-        run_capture_loop(&capture, &mut encoder, &clock, &running, &stats, fps);
-        info!("Capture pump stopped; tearing down");
-
-        // Closing stdin makes ffmpeg flush its pipeline and exit, which in turn
-        // ends the reader thread; that must happen before signalling shutdown.
-        encoder.stop()?;
+        // The audio pump is the whole session: if it dies, there is nothing
+        // left to send, so its exit has to end the session too.
+        while self.running.load(Ordering::SeqCst) && !audio.is_finished() {
+            std::thread::sleep(Duration::from_millis(100));
+        }
         self.running.store(false, Ordering::SeqCst);
-        for handle in threads.drain(..) {
-            let _ = handle.join();
-        }
-        if let Some(handle) = audio_handle {
-            let _ = handle.join();
-        }
 
+        let outcome = match audio.join() {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(e),
+            Err(_) => bail!("audio pump panicked"),
+        };
         if let Err(e) = handshake.teardown() {
             warn!("TEARDOWN failed: {e}");
         }
-        // One guard for both readings: two `lock()` calls in the same statement
-        // keep the first alive while asking for the second, and this mutex is
-        // not reentrant.
-        let (frames, access_units) = {
-            let s = stats.lock().unwrap();
-            (s.frames_captured, s.access_units_sent)
-        };
-        info!("Stream session ended: {frames} frames, {access_units} access units");
-        Ok(())
+        let stats = self.stats.lock().unwrap().clone();
+        info!(
+            "RAOP session ended after {:.1}s: {} audio frames, {:.1} MB",
+            started.elapsed().as_secs_f64(),
+            stats.audio_frames_sent,
+            stats.bytes_sent as f64 / 1_000_000.0
+        );
+        outcome
     }
 }
 
-/// An access unit plus the wall-clock time its frame left the screen capture.
-struct AccessUnit {
-    nalus: Vec<Nal>,
-    captured_at: Instant,
-}
+/// Runs the whole audio path on one thread: WASAPI's COM interfaces are not
+/// `Send`, so capture and its resampler are created and used here.
+fn spawn_audio(
+    endpoint: Endpoint,
+    mut rtp: RtpPacketizer,
+    running: &Arc<AtomicBool>,
+    stats: Arc<Mutex<StreamStats>>,
+) -> JoinHandle<Result<()>> {
+    let running = running.clone();
 
-/// Capture instants of fed frames, consumed in encoder output order. The
-/// encoder preserves frame order and runs at zerolatency, so one queued
-/// instant corresponds to one emitted access unit.
-type CaptureClock = Arc<Mutex<VecDeque<Instant>>>;
+    std::thread::Builder::new()
+        .name("raop-audio".to_string())
+        .spawn(move || -> Result<()> {
+            let capture =
+                AudioCapture::new().context("system audio capture is unavailable")?;
+            let format = capture.format().clone();
+            let mut encoder = AudioEncoder::new(format.clone());
+            encoder
+                .start()
+                .context("the audio resampler would not start")?;
+            let mut stdout = encoder
+                .take_stdout()
+                .context("the audio resampler has no stdout")?;
+            capture
+                .start()
+                .context("system audio capture would not start")?;
+            info!(
+                "Audio path live: {}Hz {}ch -> L16 44100Hz 2ch",
+                format.sample_rate, format.channels
+            );
 
-/// Reads ffmpeg stdout, splits Annex-B, and emits grouped access units.
-fn read_access_units(
-    mut stdout: impl Read,
-    running: &AtomicBool,
-    tx: &SyncSender<AccessUnit>,
-    clock: &CaptureClock,
-) {
-    let mut reader = AccessUnitReader::new();
-    let mut chunk = [0u8; 64 * 1024];
-
-    // Each emitted picture consumes one capture instant: the clock is fed by
-    // the capture loop in the same order the encoder produces pictures.
-    let emit = |nalus: Vec<Nal>| -> bool {
-        let captured_at = clock
-            .lock()
-            .unwrap()
-            .pop_front()
-            .unwrap_or_else(Instant::now);
-        tx.send(AccessUnit {
-            nalus,
-            captured_at,
-        })
-        .is_ok()
-    };
-
-    while running.load(Ordering::SeqCst) {
-        match stdout.read(&mut chunk) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => {
-                for nalus in reader.push(&chunk[..n]) {
-                    if !emit(nalus) {
-                        return;
+            // L16 has no framing, so the converter's byte stream is cut into
+            // whole 352-frame packets here. A partial frame at the end of a
+            // session is dropped rather than padded with audio that was never
+            // captured.
+            let (frame_tx, frame_rx) = mpsc::sync_channel::<Vec<u8>>(16);
+            let reader_running = running.clone();
+            let reader = std::thread::spawn(move || {
+                let mut buffer: Vec<u8> = Vec::with_capacity(L16_PACKET_BYTES * 2);
+                let mut chunk = [0u8; 8 * 1024];
+                while reader_running.load(Ordering::SeqCst) {
+                    match stdout.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            buffer.extend_from_slice(&chunk[..n]);
+                            while buffer.len() >= L16_PACKET_BYTES {
+                                let frame = buffer.drain(..L16_PACKET_BYTES).collect();
+                                if frame_tx.send(frame).is_err() {
+                                    return;
+                                }
+                            }
+                        }
                     }
                 }
+            });
+
+            let mut sr = RtcpSenderReport::new(rtp.ssrc());
+            let mut samples: u64 = 0;
+            let mut window = RateWindow::start();
+            let mut poll_gap = Duration::from_millis(5);
+            let mut outcome = Ok(());
+
+            while running.load(Ordering::SeqCst) {
+                if let Some(chunk) = capture.poll() {
+                    if encoder.send_pcm(&chunk.pcm).is_err() {
+                        outcome = Err(anyhow::anyhow!("the audio resampler stdin closed"));
+                        break;
+                    }
+                    // Pace the next poll to about half a buffer so WASAPI never
+                    // backs up while the pipe reader drains asynchronously.
+                    let frames = chunk.pcm.len() / format.block_align as usize;
+                    poll_gap = Duration::from_micros(
+                        (frames as u64 * 1_000_000 / format.sample_rate as u64 / 2)
+                            .max(1_000),
+                    );
+                }
+
+                let frame = match frame_rx.try_recv() {
+                    Ok(f) => f,
+                    Err(mpsc::TryRecvError::Empty) => {
+                        std::thread::sleep(poll_gap);
+                        continue;
+                    }
+                    Err(mpsc::TryRecvError::Disconnected) => break,
+                };
+
+                // L16 advances by exactly the samples one packet carries.
+                let timestamp = samples as u32;
+                samples += L16_FRAMES_PER_PACKET as u64;
+
+                let packet = rtp.packetize_pcm(&frame, timestamp);
+                sr.observe_packet(timestamp, (packet.len() - 12) as u32);
+                if let Err(e) = endpoint.rtp.send(&packet) {
+                    outcome = Err(anyhow::anyhow!("audio RTP send failed: {e}"));
+                    break;
+                }
+                sr.mark_clock();
+                if let Err(e) = endpoint.rtcp.send(&sr.serialize()) {
+                    debug!("Audio RTCP send failed: {e}");
+                }
+
+                window.on_frame(packet.len());
+                // Count sample frames, not packets: this is the same unit a
+                // receiver reports, so the two sides can be compared directly.
+                stats.lock().unwrap().audio_frames_sent += L16_FRAMES_PER_PACKET as u64;
+                window.publish(&stats);
             }
-        }
-    }
 
-    for nalus in reader.finish() {
-        if !emit(nalus) {
-            return;
-        }
-    }
-}
-
-fn run_capture_loop(
-    capture: &ScreenCapture,
-    encoder: &mut VideoEncoder,
-    clock: &CaptureClock,
-    running: &AtomicBool,
-    stats: &Arc<Mutex<StreamStats>>,
-    fps: u32,
-) {
-    let frame_interval = Duration::from_micros(1_000_000 / fps as u64);
-    let mut next_tick = Instant::now();
-    // Last pixels out of the capture; reused when the screen has not changed,
-    // so every tick still costs exactly one encoded picture.
-    let mut buffer: Vec<u8> = Vec::new();
-    let mut fed = 0u64;
-    let mut dropped = 0u64;
-
-    while running.load(Ordering::SeqCst) {
-        let due = next_tick;
-        next_tick = next_tick + frame_interval;
-        if next_tick > Instant::now() {
-            std::thread::sleep(next_tick.saturating_duration_since(Instant::now()));
-        }
-
-        let changed = match capture.capture_frame(0) {
-            Ok(Some(frame)) => {
-                buffer = frame.data;
-                true
-            }
-            Ok(None) => false,
-            Err(e) => {
-                warn!("Capture error: {e}");
-                false
-            }
-        };
-        if !changed && buffer.is_empty() {
-            // Nothing has reached us yet; there is no picture to encode.
-            continue;
-        }
-        // Frames handed to the encoder leave the pipeline one access unit at a
-        // time, so the queue length is its backlog. Past a few frames the viewer
-        // is watching history, so the newest pixels replace what is not encoded
-        // yet instead of queueing behind it.
-        if clock.lock().unwrap().len() >= MAX_BACKLOG_FRAMES {
-            dropped += 1;
-            stats.lock().unwrap().frames_dropped = dropped;
-            continue;
-        }
-        if encoder.send_frame(&buffer).is_err() {
-            warn!("Video encoder stdin closed after {fed} frames");
-            return;
-        }
-        // Exactly one clock instant per fed frame keeps the latency measure
-        // aligned with the access units the reader pops.
-        clock.lock().unwrap().push_back(due);
-        fed += 1;
-        stats.lock().unwrap().frames_captured = fed;
-    }
-    info!("Capture pump fed {fed} frames, dropped {dropped}");
-}
-
-fn send_video(
-    endpoint: Endpoint,
-    au_rx: &mpsc::Receiver<AccessUnit>,
-    running: &AtomicBool,
-    stats: &Arc<Mutex<StreamStats>>,
-    started: Instant,
-) {
-    let mut rtp = RtpPacketizer::new(VIDEO_PAYLOAD_TYPE, VIDEO_CLOCK);
-    let mut sr = RtcpSenderReport::new(rtp.ssrc());
-    let mut window = RateWindow::start();
-
-    while running.load(Ordering::SeqCst) {
-        let au = match au_rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(au) => au,
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        };
-
-        let timestamp = rtp.clock_for_ms(started.elapsed().as_millis() as u64);
-        let packets = rtp.packetize_h264(&au.nalus, timestamp);
-        let payload_bytes: usize = packets.iter().map(|p| p.len() - 12).sum();
-
-        for pkt in &packets {
-            sr.observe_packet(timestamp, (pkt.len() - 12) as u32);
-            if let Err(e) = endpoint.rtp.send(pkt) {
-                warn!("Video RTP send failed: {e}");
-                return;
-            }
-        }
-        sr.mark_clock();
-        if let Err(e) = endpoint.rtcp.send(&sr.serialize()) {
-            debug!("Video RTCP send failed: {e}");
-        }
-
-        window.on_access_unit(packets.len(), payload_bytes, au.captured_at);
-        {
-            let mut s = stats.lock().unwrap();
-            s.access_units_sent += 1;
-        }
-        window.publish(stats);
-    }
+            capture.stop();
+            let _ = encoder.stop();
+            let _ = reader.join();
+            // The last partial second is still real traffic; publishing it keeps
+            // the packet and byte totals equal to what left the socket.
+            window.flush(&stats);
+            info!("Audio pump stopped");
+            outcome
+        })
+        .expect("failed to spawn the RAOP audio thread")
 }
 
 /// Tracks a one-second measurement window and publishes it into shared stats.
 struct RateWindow {
     since: Instant,
-    units: u64,
     packets: u64,
     bytes: u64,
-    latency_ms: f64,
 }
 
 impl RateWindow {
     fn start() -> Self {
         Self {
             since: Instant::now(),
-            units: 0,
             packets: 0,
             bytes: 0,
-            latency_ms: 0.0,
         }
     }
 
-    fn on_access_unit(&mut self, packets: usize, bytes: usize, captured_at: Instant) {
-        self.units += 1;
-        self.packets += packets as u64;
-        self.bytes += bytes as u64;
-        self.latency_ms = Instant::now()
-            .duration_since(captured_at)
-            .as_secs_f64()
-            * 1000.0;
-    }
-
     fn on_frame(&mut self, bytes: usize) {
-        self.units += 1;
         self.packets += 1;
         self.bytes += bytes as u64;
     }
 
-    /// Publishes once at least a second has passed, returning the measured rate.
-    fn publish(&mut self, stats: &Arc<Mutex<StreamStats>>) -> Option<(f64, f64)> {
+    /// Publishes once at least a second has passed.
+    fn publish(&mut self, stats: &Arc<Mutex<StreamStats>>) {
         let secs = self.since.elapsed().as_secs_f64();
         if secs < 1.0 {
-            return None;
+            return;
         }
-        let fps = self.units as f64 / secs;
+        self.flush_for(secs, stats);
+    }
+
+    /// Publishes whatever is left when the pump stops.
+    fn flush(&mut self, stats: &Arc<Mutex<StreamStats>>) {
+        let secs = self.since.elapsed().as_secs_f64();
+        if secs > 0.0 {
+            self.flush_for(secs, stats);
+        }
+    }
+
+    fn flush_for(&mut self, secs: f64, stats: &Arc<Mutex<StreamStats>>) {
         let mbps = self.bytes as f64 * 8.0 / secs / 1_000_000.0;
-
-        let mut s = stats.lock().unwrap();
-        s.fps = fps;
-        s.bitrate_mbps = mbps;
-        s.rtp_packets_sent += self.packets;
-        s.bytes_sent += self.bytes;
-        if self.latency_ms > 0.0 {
-            s.latency_ms = self.latency_ms;
+        {
+            let mut s = stats.lock().unwrap();
+            s.fps = self.packets as f64 / secs;
+            s.bitrate_mbps = mbps;
+            s.rtp_packets_sent += self.packets;
+            s.bytes_sent += self.bytes;
         }
-        drop(s);
-
         self.since = Instant::now();
-        self.units = 0;
         self.packets = 0;
         self.bytes = 0;
-        Some((fps, mbps))
     }
 }
 
-/// Runs the whole audio path on one thread.
-///
-/// WASAPI's COM interfaces are not `Send`, so `AudioCapture` and the encoder
-/// that consumes it have to be created and used inside this thread; only the
-/// decoded AAC frames cross back out as owned `Vec<u8>`.
-fn spawn_audio(
-    endpoint: Endpoint,
-    host: &str,
-    server_port: u16,
-    running: &Arc<AtomicBool>,
-    stats: Arc<Mutex<StreamStats>>,
-) -> JoinHandle<()> {
-    let host = host.to_string();
-    let running = running.clone();
-
-    std::thread::spawn(move || {
-        let capture = match AudioCapture::new() {
-            Ok(c) => c,
-            Err(e) => {
-                warn!("Audio path unavailable: {e:#}");
-                return;
-            }
-        };
-        let format = capture.format().clone();
-        let mut encoder = AudioEncoder::new(format.clone(), AUDIO_BITRATE);
-        if let Err(e) = encoder.start() {
-            warn!("Audio path unavailable: {e:#}");
-            return;
-        }
-        let mut stdout = match encoder.take_stdout() {
-            Some(s) => s,
-            None => {
-                warn!("Audio path unavailable: AAC encoder has no stdout");
-                return;
-            }
-        };
-
-        let target = format!("{host}:{server_port}");
-        if let Err(e) = endpoint.rtp.connect(&target) {
-            warn!("Audio path unavailable: failed to connect {target}: {e}");
-            return;
-        }
-        let _ = endpoint.rtcp.connect(format!("{host}:{}", server_port + 1));
-        if let Err(e) = capture.start() {
-            warn!("Audio path unavailable: {e:#}");
-            return;
-        }
-        info!(
-            "Audio path live: {}Hz {}ch -> {target}",
-            format.sample_rate, format.channels
-        );
-
-        // AAC frames decoded by ffmpeg leave through a channel so reading the
-        // pipe cannot block the WASAPI polling loop.
-        let (frame_tx, frame_rx) = mpsc::sync_channel::<AdtsFrame>(16);
-        let reader_running = running.clone();
-        std::thread::spawn(move || {
-            let mut parser = AdtsParser::default();
-            let mut buf = [0u8; 8 * 1024];
-            while reader_running.load(Ordering::SeqCst) {
-                match stdout.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        parser.push(&buf[..n]);
-                        while let Some(frame) = parser.next_frame() {
-                            if frame_tx.send(frame).is_err() {
-                                return;
-                            }
-                        }
-                    }
-                }
-            }
-        });
-
-        let mut rtp = RtpPacketizer::new(AUDIO_PAYLOAD_TYPE, AUDIO_CLOCK);
-        let mut sr = RtcpSenderReport::new(rtp.ssrc());
-        let mut samples: u64 = 0;
-        let mut window = RateWindow::start();
-        let mut poll_gap = Duration::from_millis(5);
-
-        while running.load(Ordering::SeqCst) {
-            if let Some(chunk) = capture.poll() {
-                if encoder.send_pcm(&chunk.pcm).is_err() {
-                    warn!("AAC encoder stdin closed");
-                    break;
-                }
-                // Pace the next poll to about half a buffer so WASAPI never
-                // backs up while the pipe reader drains asynchronously.
-                let frames = chunk.pcm.len() / format.block_align as usize;
-                poll_gap = Duration::from_micros(
-                    (frames as u64 * 1_000_000 / format.sample_rate as u64 / 2).max(1_000),
-                );
-            }
-
-            let frame = match frame_rx.try_recv() {
-                Ok(f) => f,
-                Err(mpsc::TryRecvError::Empty) => {
-                    std::thread::sleep(poll_gap);
-                    continue;
-                }
-                Err(mpsc::TryRecvError::Disconnected) => break,
-            };
-
-            // AAC-hbr advances by exactly one frame of samples per access unit.
-            let timestamp = samples as u32;
-            samples += frame.samples as u64;
-
-            let packet = rtp.packetize_aac(&frame.data, timestamp);
-            sr.observe_packet(timestamp, (packet.len() - 12) as u32);
-            if let Err(e) = endpoint.rtp.send(&packet) {
-                warn!("Audio RTP send failed: {e}");
-                break;
-            }
-            sr.mark_clock();
-            let _ = endpoint.rtcp.send(&sr.serialize());
-
-            window.on_frame(packet.len());
-            stats.lock().unwrap().audio_frames_sent += 1;
-            window.publish(&stats);
-        }
-
-        capture.stop();
-        let _ = encoder.stop();
-        info!("Audio pump stopped");
-    })
-}
 struct RtspRawResponse {
     status_line: String,
     headers: HashMap<String, String>,
@@ -667,11 +486,8 @@ struct RtspRawResponse {
 fn rtsp_handshake(
     host: &str,
     port: u16,
-    video: &Endpoint,
-    audio: Option<&Endpoint>,
-    width: u32,
-    height: u32,
-    fps: u32,
+    endpoint: &Endpoint,
+    initial_seq: u16,
 ) -> Result<Handshake> {
     let addr = format!("{host}:{port}");
     let mut stream = TcpStream::connect(&addr).with_context(|| format!("connect {addr}"))?;
@@ -689,68 +505,56 @@ fn rtsp_handshake(
     )
     .context("OPTIONS rejected")?;
 
-    let sdp = build_sdp(width, height, fps, audio.is_some());
     request(
         &mut stream,
         &mut cseq,
         "ANNOUNCE * RTSP/1.0",
         &[("Content-Type", "application/sdp"), ("Server", "AeroSend/1.0")],
-        &sdp,
+        &build_sdp(),
     )
     .context("ANNOUNCE rejected")?;
 
-    let transport = |e: &Endpoint| {
-        format!(
-            "RTP/AVP/UDP;unicast;destination={host};mode=play;client_port={}-{}",
-            e.rtp_port,
-            e.rtp_port + 1
-        )
-    };
+    // `control_port` and `timing_port` are not optional to every receiver: a
+    // RAOP SETUP without them is answered 461 even though the audio port is
+    // spelled out. The timing socket is bound and kept alive but never spoken
+    // to, because this sender derives its clock from WASAPI, not from NTP.
+    let transport = build_transport(host, endpoint);
 
-    let video_setup = request(
+    let setup = request(
         &mut stream,
         &mut cseq,
         "SETUP * RTSP/1.0",
-        &[("Transport", &transport(video))],
+        &[("Transport", &transport)],
         "",
     )
-    .context("video SETUP rejected")?;
+    .context("audio SETUP rejected")?;
 
-    let audio_setup = match audio {
-        Some(e) => Some(
-            request(
-                &mut stream,
-                &mut cseq,
-                "SETUP * RTSP/1.0",
-                &[("Transport", &transport(e))],
-                "",
-            )
-            .context("audio SETUP rejected")?,
-        ),
-        None => None,
-    };
-
-    let session_id = video_setup
+    let session_id = setup
         .headers
         .get("session")
         .map(|s| s.split(';').next().unwrap_or(s).trim().to_string())
         .unwrap_or_else(|| "1".to_string());
 
+    // The receiver aligns its reorder buffer to the sequence number we start
+    // with; without this it treats the first packets as arriving mid-stream.
+    let rtp_info = format!("seq={initial_seq};rtptime=0");
     request(
         &mut stream,
         &mut cseq,
         "RECORD * RTSP/1.0",
-        &[("Session", &session_id), ("Range", "npt=0.000-")],
+        &[
+            ("Session", &session_id),
+            ("Range", "npt=0.000-"),
+            ("RTP-Info", &rtp_info),
+        ],
         "",
     )
     .context("RECORD rejected")?;
 
+    let server_port = server_port(&setup).unwrap_or(40000);
     Ok(Handshake {
-        video_server_port: server_port(&video_setup).unwrap_or(7100),
-        audio_server_port: audio_setup
-            .as_ref()
-            .and_then(server_port)
-            .unwrap_or(40000),
+        server_port,
+        control_port: transport_port(&setup, "control_port").unwrap_or(server_port + 1),
         session_id,
         control: stream,
         cseq,
@@ -758,10 +562,30 @@ fn rtsp_handshake(
 }
 
 fn server_port(resp: &RtspRawResponse) -> Option<u16> {
+    transport_port(resp, "server_port")
+}
+
+/// `RTP/AVP/UDP;unicast;destination=…;mode=record;client_port=…-…;…`
+///
+/// `mode=record` is what a sender of an RAOP stream asks for: the receiver
+/// records, the sender plays. `client_port` is our RTP/RTCP pair; receivers
+/// that insist on a control and timing port read them from the same header.
+fn build_transport(host: &str, endpoint: &Endpoint) -> String {
+    format!(
+        "RTP/AVP/UDP;unicast;destination={host};mode=record;\
+         client_port={rtp}-{rtcp};control_port={rtcp};timing_port={timing}",
+        rtp = endpoint.rtp_port,
+        rtcp = endpoint.rtp_port + 1,
+        timing = endpoint.timing_port,
+    )
+}
+
+fn transport_port(resp: &RtspRawResponse, name: &str) -> Option<u16> {
+    let prefix = format!("{name}=");
     resp.headers
         .get("transport")?
         .split(';')
-        .find(|p| p.trim().starts_with("server_port="))?
+        .find(|part| part.trim().starts_with(&prefix))?
         .split('=')
         .nth(1)?
         .trim()
@@ -771,30 +595,21 @@ fn server_port(resp: &RtspRawResponse) -> Option<u16> {
         .ok()
 }
 
-fn build_sdp(width: u32, height: u32, fps: u32, audio_enabled: bool) -> String {
-    let mut sdp = format!(
+/// An audio-only SDP: RAOP's `m=audio` line with L16 at 44.1kHz stereo.
+///
+/// L16 is raw big-endian PCM and the only codec every RAOP receiver must
+/// decode. No `rsaaeskey`/`aesiv`, so the payloads travel in the clear.
+fn build_sdp() -> String {
+    format!(
         "v=0\r\n\
          o=AeroSend 0 0 IN IP4 0.0.0.0\r\n\
          s=AeroSend\r\n\
          t=0 0\r\n\
-         m=video 0 RTP/AVP {VIDEO_PAYLOAD_TYPE}\r\n\
+         m=audio 0 RTP/AVP {AUDIO_PAYLOAD_TYPE}\r\n\
          c=IN IP4 0.0.0.0\r\n\
-         a=rtpmap:{VIDEO_PAYLOAD_TYPE} H264/90000\r\n\
-         a=fmtp:{VIDEO_PAYLOAD_TYPE} packetization-mode=1;profile-level-id=640028\r\n\
-         a=framerate:{fps}\r\n\
-         a=framesize:{VIDEO_PAYLOAD_TYPE} {width}-{height}\r\n"
-    );
-    if audio_enabled {
-        // AAC-LC at 44.1kHz stereo: AudioSpecificConfig 0x1210.
-        sdp.push_str(
-            "m=audio 0 RTP/AVP 106\r\n\
-             c=IN IP4 0.0.0.0\r\n\
-             a=rtpmap:106 mpeg4-generic/44100/2\r\n\
-             a=fmtp:106 profile-level-id=1;mode=AAC-hbr;sizelength=13;indexlength=3;indexdeltalength=3;config=1210\r\n\
-             a=control:streamid=1\r\n",
-        );
-    }
-    sdp
+         a=rtpmap:{AUDIO_PAYLOAD_TYPE} L16/44100/2\r\n\
+         a=control:streamid=1\r\n"
+    )
 }
 
 fn request(
@@ -860,3 +675,70 @@ fn read_response(stream: &mut TcpStream) -> Result<RtspRawResponse> {
     })
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The receiver decodes nothing but L16, and it takes the codec from the
+    /// audio media line. Announcing AAC is what turned every session into a 403.
+    #[test]
+    fn the_audio_line_announces_l16_as_plain_pcm() {
+        let sdp = build_sdp();
+        assert!(sdp.contains("m=audio 0 RTP/AVP 96\r\n"), "{sdp}");
+        assert!(sdp.contains("a=rtpmap:96 L16/44100/2\r\n"), "{sdp}");
+        assert!(!sdp.contains("m=video"), "{sdp}");
+        assert!(!sdp.contains("mpeg4-generic"), "{sdp}");
+        // No rsaaeskey/aesiv: L16 is sent in the clear, and a receiver that
+        // sees keys would try to decrypt packets that are not encrypted.
+        assert!(!sdp.contains("rsaaeskey") && !sdp.contains("aesiv"), "{sdp}");
+    }
+
+    /// One packet carries 352 frames of stereo 16-bit PCM; the RTP clock has to
+    /// advance by that many samples or the receiver's playout drifts.
+    #[test]
+    fn an_l16_packet_is_352_stereo_frames() {
+        assert_eq!(L16_PACKET_BYTES, 1408);
+        assert_eq!(L16_PACKET_BYTES % (L16_CHANNELS * 2), 0);
+    }
+
+    #[test]
+    fn the_setup_names_control_and_timing_ports() {
+        let endpoint = bind_endpoint().expect("local ports");
+        let transport = build_transport("127.0.0.1", &endpoint);
+        assert!(
+            transport.contains(&format!(
+                "client_port={}-{}",
+                endpoint.rtp_port,
+                endpoint.rtp_port + 1
+            )),
+            "{transport}"
+        );
+        assert!(
+            transport.contains(&format!("control_port={}", endpoint.rtp_port + 1)),
+            "{transport}"
+        );
+        assert!(
+            transport.contains(&format!("timing_port={}", endpoint.timing_port)),
+            "{transport}"
+        );
+        assert!(transport.contains("mode=record"), "{transport}");
+    }
+
+    /// RAOP replies name a control port that need not be `server_port + 1`.
+    #[test]
+    fn the_receiver_control_port_is_read_from_the_reply() {
+        let mut headers = HashMap::new();
+        headers.insert(
+            "transport".to_string(),
+            "RTP/AVP/UDP;unicast;interleaved=0-1;mode=record;control_port=50124;timing_port=50125;server_port=40120"
+                .to_string(),
+        );
+        let resp = RtspRawResponse {
+            status_line: "RTSP/1.0 200 OK".to_string(),
+            headers,
+        };
+        assert_eq!(server_port(&resp), Some(40120));
+        assert_eq!(transport_port(&resp, "control_port"), Some(50124));
+        assert_eq!(transport_port(&resp, "timing_port"), Some(50125));
+    }
+}

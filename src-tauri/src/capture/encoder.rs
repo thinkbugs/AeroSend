@@ -1,9 +1,16 @@
 use anyhow::{Context, Result};
 use ffmpeg_sidecar::{child::FfmpegChild, command::FfmpegCommand};
 use std::io::Write;
+use std::os::windows::process::CommandExt;
 use std::process::{ChildStdin, ChildStdout};
 use std::sync::LazyLock;
 use tracing::info;
+
+/// ffmpeg is a console program and AeroSend is not, so a raw spawn gets its own
+/// console window: starting a cast used to flash one window per probe before the
+/// picture even began. `FfmpegCommand` sets this for itself; these are the
+/// encoders we ask about directly.
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Which H.264 encoders the bundled ffmpeg actually provides.
 #[derive(Debug, Clone)]
@@ -31,6 +38,7 @@ fn codec_opens(path: &std::path::Path, codec: &str) -> bool {
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
+        .creation_flags(CREATE_NO_WINDOW)
         .spawn();
     let Ok(mut child) = child else { return false };
     // One blank frame is enough to reach the encoder and see it refuse.
@@ -52,6 +60,7 @@ pub fn probe_encoders() -> Result<EncoderProbe, String> {
     let path = ffmpeg_sidecar::paths::ffmpeg_path();
     let out = std::process::Command::new(&path)
         .args(["-hide_banner", "-encoders"])
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| format!("Could not run {} ({e})", path.display()))?;
     let text = String::from_utf8_lossy(&out.stdout);

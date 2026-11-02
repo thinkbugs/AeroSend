@@ -5,11 +5,13 @@
 use aerosend::airplay::h264::{AccessUnitReader, Nal, NalType};
 use aerosend::airplay::rtp::RtpPacketizer;
 use aerosend::capture::encoder::{probe_encoders, EncoderType, VideoEncoder};
-use aerosend::stream::session::VIDEO_CLOCK;
 use std::io::Read;
 use std::process::Command;
 use std::sync::mpsc;
 use ffmpeg_sidecar::ffprobe::ffprobe_path;
+
+/// The clock rate H.264 RTP uses, so timestamp spacing can be checked.
+const VIDEO_CLOCK: u32 = 90_000;
 
 const W: usize = 320;
 const H: usize = 240;
