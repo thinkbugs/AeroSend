@@ -1,4 +1,4 @@
-//! Tauri commands for the DLNA cast path.
+//! Tauri commands for the media cast path.
 //!
 //! Every UPnP call here is a socket round trip with a timeout, so each command
 //! runs on the blocking pool instead of the async runtime's task threads.
@@ -44,23 +44,32 @@ pub async fn renderers(state: State<'_, AppState>) -> Result<Vec<RendererInfo>, 
     Ok(state.caster.renderers())
 }
 
-/// The native Windows file dialog, opened from the cast page.
+/// The native Windows file dialog, opened from the media cast page.
 ///
 /// The dialog is a modal loop of its own, so it belongs on the blocking pool;
 /// `None` is the user pressing Cancel, which is not an error.
+///
+/// One filter per media kind, because the page plays all three: a single
+/// "everything" list makes a user who wants a photo scroll through the video
+/// folder, and a folder of raw files has no extension to announce.
 #[tauri::command]
 pub async fn pick_media_file() -> Result<Option<String>, CastErrorInfo> {
     let picked = tokio::task::spawn_blocking(|| {
         rfd::FileDialog::new()
-            .set_title("Choose a video or audio file to cast")
+            .set_title("选择要投屏的媒体文件")
             .add_filter(
-                "Video and audio",
+                "视频",
                 &[
-                    "mp4", "m4v", "mov", "mkv", "avi", "mpg", "mpeg", "ts", "webm", "mp3", "m4a",
-                    "aac", "flac", "wav", "ogg", "opus",
+                    "mp4", "m4v", "mov", "mkv", "avi", "mpg", "mpeg", "ts", "m2ts", "webm", "flv",
+                    "wmv",
                 ],
             )
-            .add_filter("All files", &["*"])
+            .add_filter(
+                "音乐",
+                &["mp3", "m4a", "aac", "flac", "wav", "ogg", "oga", "opus", "wma"],
+            )
+            .add_filter("图片", &["jpg", "jpeg", "png", "gif", "webp", "bmp"])
+            .add_filter("所有文件", &["*"])
             .pick_file()
             .map(|path| path.to_string_lossy().into_owned())
     })

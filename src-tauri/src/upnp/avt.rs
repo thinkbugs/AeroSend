@@ -337,11 +337,16 @@ pub fn format_time(seconds: f64) -> String {
 }
 
 /// Which UPnP class a MIME type belongs to, as devices use it to pick a player.
+///
+/// The names are the leaf classes of the Content Directory object list
+/// (`object.item.` is added by [`didl_item`]). A device that does not
+/// recognise a class does not fall back gracefully: it opens its video player
+/// for a photo, and a photo has no timeline to seek on.
 pub fn upnp_class_for(mime: &str) -> &'static str {
     if mime.starts_with("audio/") {
-        "audioItem"
+        "audioItem.musicTrack"
     } else if mime.starts_with("image/") {
-        "image"
+        "imageItem.photo"
     } else {
         "videoItem"
     }
@@ -677,9 +682,9 @@ mod tests {
         assert_eq!(xml::element_text(&wrapped, "m").unwrap(), didl);
 
         // Size is optional and its absence must not leave an empty attribute.
-        let no_size = didl_item("t", "u", "audio/mpeg", None, "audioItem");
+        let no_size = didl_item("t", "u", "audio/mpeg", None, upnp_class_for("audio/mpeg"));
         assert!(!no_size.contains("size="), "{no_size}");
-        assert!(no_size.contains("object.item.audioItem"));
+        assert!(no_size.contains("object.item.audioItem.musicTrack"), "{no_size}");
     }
 
     #[test]
@@ -766,8 +771,38 @@ mod tests {
 
     #[test]
     fn classes_map_to_the_player_a_device_picks() {
+        // The full leaf class, not a made-up short name: a device that does not
+        // recognise the class plays the item in its video player.
         assert_eq!(upnp_class_for("video/mp4"), "videoItem");
-        assert_eq!(upnp_class_for("audio/flac"), "audioItem");
-        assert_eq!(upnp_class_for("image/jpeg"), "image");
+        assert_eq!(upnp_class_for("audio/flac"), "audioItem.musicTrack");
+        assert_eq!(upnp_class_for("image/jpeg"), "imageItem.photo");
+        // Anything unnamed stays a video item, which is what a stream is.
+        assert_eq!(upnp_class_for("application/octet-stream"), "videoItem");
+    }
+
+    #[test]
+    fn a_photo_and_a_song_announce_the_class_their_player_expects() {
+        let photo = didl_item(
+            "Holiday",
+            "http://10.0.0.2:7878/m/abc.jpg",
+            "image/jpeg",
+            Some(4096),
+            upnp_class_for("image/jpeg"),
+        );
+        assert!(photo.contains("<upnp:class>object.item.imageItem.photo</upnp:class>"), "{photo}");
+        assert!(photo.contains(r#"protocolInfo="http-get:*:image/jpeg:*""#), "{photo}");
+
+        let song = didl_item(
+            "Encore",
+            "http://10.0.0.2:7878/m/def.flac",
+            "audio/flac",
+            None,
+            upnp_class_for("audio/flac"),
+        );
+        assert!(
+            song.contains("<upnp:class>object.item.audioItem.musicTrack</upnp:class>"),
+            "{song}"
+        );
+        assert!(song.contains(r#"protocolInfo="http-get:*:audio/flac:*""#), "{song}");
     }
 }

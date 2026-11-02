@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import type { AnnotationState, Device, AppState } from "../types";
+import { deviceTypeLabel } from "../labels";
 
 interface SidebarProps {
   devices: Device[];
@@ -61,7 +62,7 @@ export default function Sidebar({
             <rect x="3" y="14" width="7" height="7" />
             <rect x="14" y="14" width="7" height="7" />
           </svg>
-          <span>Dashboard</span>
+          <span>设备</span>
         </button>
         <button
           className={`nav-item ${page === "cast" ? "active" : ""}`}
@@ -74,7 +75,7 @@ export default function Sidebar({
             <path d="M16.5 9.5a3.5 3.5 0 0 0-3-1.5" />
             <path d="M18.5 7.5a6 6 0 0 0-5-2.5" />
           </svg>
-          <span>DLNA Cast</span>
+          <span>媒体投屏</span>
         </button>
         <button
           className={`nav-item ${page === "settings" ? "active" : ""}`}
@@ -84,18 +85,18 @@ export default function Sidebar({
             <circle cx="12" cy="12" r="3" />
             <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
           </svg>
-          <span>Settings</span>
+          <span>设置</span>
         </button>
       </nav>
 
       <div className="sidebar-section">
         <div className="section-header">
-          <span>Devices</span>
+          <span>设备</span>
           <button
             className={`rescan-btn ${scanning ? "scanning" : ""}`}
             onClick={onRescan}
             disabled={scanning}
-            title="Rescan"
+            title="重新扫描"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M21 2v6h-6" />
@@ -112,10 +113,10 @@ export default function Sidebar({
               {scanning ? (
                 <>
                   <div className="spinner" />
-                  <span>Scanning...</span>
+                  <span>正在扫描…</span>
                 </>
               ) : (
-                <span>No devices found</span>
+                <span>未发现设备</span>
               )}
             </div>
           )}
@@ -136,7 +137,7 @@ export default function Sidebar({
                 <span className="device-name">{device.name}</span>
                 <span className="device-host">{device.host}:{device.port}</span>
               </div>
-              <span className={`device-type ${device.type}`}>{device.type}</span>
+              <span className={`device-type ${device.type}`}>{deviceTypeLabel(device.type)}</span>
             </button>
           ))}
         </div>
@@ -144,7 +145,7 @@ export default function Sidebar({
 
       <div className="sidebar-section">
         <div className="section-header">
-          <span>Annotation</span>
+          <span>屏幕批注</span>
         </div>
         {annotation.open ? (
           <div className="annotate-controls">
@@ -156,13 +157,13 @@ export default function Sidebar({
                 <rect x="4" y="10" width="16" height="10" rx="2" />
                 <path d={annotation.passthrough ? "M8 10V7a4 4 0 0 1 8 0" : "M8 10V7a4 4 0 0 1 8 0v3"} />
               </svg>
-              <span>{annotation.passthrough ? "Resume drawing" : "Lock pointer"}</span>
+              <span>{annotation.passthrough ? "恢复绘制" : "锁定鼠标"}</span>
             </button>
             <button className="annotate-btn-side ghost" onClick={onToggleAnnotation}>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M18 6L6 18M6 6l12 12" />
               </svg>
-              <span>Close overlay</span>
+              <span>关闭批注层</span>
             </button>
           </div>
         ) : (
@@ -172,11 +173,10 @@ export default function Sidebar({
                 <path d="M12 19l7-7 3 3-7 7-3-3z" />
                 <path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z" />
               </svg>
-              <span>Draw on screen</span>
+              <span>在屏幕上绘制</span>
             </button>
             <p className="annotate-side-note">
-              Ink sits on top of the desktop, so it leaves with the mirror and the
-              receiver sees it.
+              墨迹位于桌面最上层，会随镜像一起送到接收端。
             </p>
           </>
         )}
@@ -188,7 +188,7 @@ export default function Sidebar({
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M18 6L6 18M6 6l12 12" />
             </svg>
-            <span>Disconnect</span>
+            <span>断开连接</span>
           </button>
         </div>
       )}
@@ -197,11 +197,11 @@ export default function Sidebar({
         <div className="status-indicator">
           <span className={`status-dot ${state}`} />
           <span className="status-text">
-            {state === "idle" && "Ready"}
-            {state === "discovering" && "Discovering..."}
-            {state === "connecting" && "Connecting..."}
-            {state === "streaming" && "Streaming"}
-            {state === "error" && "Error"}
+            {state === "idle" && "就绪"}
+            {state === "discovering" && "正在发现…"}
+            {state === "connecting" && "正在连接…"}
+            {state === "streaming" && "正在投屏"}
+            {state === "error" && "出错"}
           </span>
         </div>
         <span className="time">{time.toLocaleTimeString("zh-CN")}</span>

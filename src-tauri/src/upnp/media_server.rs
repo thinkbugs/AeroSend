@@ -172,13 +172,44 @@ impl MediaServer {
 
 impl MediaFile {
     /// The castable URL for this file.
+    ///
+    /// The id carries the address, and the original extension is appended to
+    /// it: a receiver that only has the URL to go on (`/m/45bd36a3` says
+    /// nothing) picks its player from that extension, and a photo handed over
+    /// as a nameless stream is a black screen with a working progress bar.
     pub fn url_for(&self, host: &str, port: u16) -> Result<String, ServeError> {
         if host.is_empty() {
             return Err(ServeError {
                 message: "no LAN address to advertise for the media server".into(),
             });
         }
-        Ok(format!("http://{host}:{port}/m/{}", self.id))
+        Ok(format!(
+            "http://{host}:{port}/m/{}{}",
+            self.id,
+            suffix_of(&self.path)
+        ))
+    }
+}
+
+/// The extension part of a cast URL, kept to what a URL can carry.
+///
+/// A device-named extension is decoration next to the id, so anything odd
+/// (a space, a dot-dot, twenty characters) is dropped rather than encoded; the
+/// server ignores it on the way back in anyway.
+fn suffix_of(path: &Path) -> String {
+    let raw = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let clean: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(8)
+        .collect();
+    if clean.is_empty() {
+        String::new()
+    } else {
+        format!(".{clean}")
     }
 }
 
@@ -227,6 +258,10 @@ pub fn handle(
         return respond(&mut sock, "404 Not Found", &[], b"");
     };
     let id = id.split(['?', '#']).next().unwrap_or(id);
+    // The advertised URL ends in the file's extension so that a receiver can
+    // choose a player from the address alone; ids are hex and hold no dot, so
+    // the part before the first one is the whole id.
+    let id = id.split('.').next().unwrap_or(id);
     let file = {
         let guard = files.lock().unwrap();
         guard.iter().find(|f| f.id == id).cloned()
@@ -464,10 +499,15 @@ pub fn mime_from_extension(name_or_url: &str) -> String {
         "aac" | "m4a" => "audio/mp4",
         "flac" => "audio/flac",
         "wav" => "audio/wav",
-        "ogg" => "audio/ogg",
+        "ogg" | "oga" => "audio/ogg",
+        "wma" => "audio/x-ms-wma",
+        "opus" => "audio/opus",
         "jpg" | "jpeg" => "image/jpeg",
         "png" => "image/png",
         "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "avif" => "image/avif",
         _ => "application/octet-stream",
     }
     .to_string()
@@ -719,6 +759,16 @@ mod tests {
         assert_eq!(mime_from_extension("/x/y.mkv"), "video/x-matroska");
         assert_eq!(mime_from_extension("a.m4v"), "video/mp4");
         assert_eq!(mime_from_extension("track.flac"), "audio/flac");
+        // The kinds the media page now offers beyond video: a wrong guess here
+        // sends a photo to the TV's video player.
+        assert_eq!(mime_from_extension("Holiday.JPEG"), "image/jpeg");
+        assert_eq!(mime_from_extension("/x/y.png"), "image/png");
+        assert_eq!(mime_from_extension("cover.webp"), "image/webp");
+        assert_eq!(mime_from_extension("scan.bmp"), "image/bmp");
+        assert_eq!(mime_from_extension("art.avif"), "image/avif");
+        assert_eq!(mime_from_extension("voice.m4a"), "audio/mp4");
+        assert_eq!(mime_from_extension("song.opus"), "audio/opus");
+        assert_eq!(mime_from_extension("old.wma"), "audio/x-ms-wma");
         assert_eq!(mime_from_extension("noext"), "application/octet-stream");
         // A dot inside a directory name must not be read as an extension.
         assert_eq!(mime_from_extension("/v1.2/movie"), "application/octet-stream");
@@ -737,7 +787,7 @@ mod tests {
         );
         let url = file.url_for("192.168.0.42", server.port()).unwrap();
         assert!(url.starts_with("http://192.168.0.42:"), "{url}");
-        assert!(url.ends_with(&format!("/m/{}", file.id)), "{url}");
+        assert_eq!(url, format!("http://192.168.0.42:{}/m/{}.mp4", server.port(), file.id));
 
         // Offering twice yields the same id, so a repeated cast does not pile
         // up duplicate registrations.
@@ -750,6 +800,51 @@ mod tests {
         assert!(file.url_for("", 1).is_err(), "an empty host cannot be advertised");
         server.stop();
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_photo_and_a_song_are_advertised_by_their_extension_and_still_served() {
+        let server = MediaServer::start().unwrap();
+        let photo_path = temp_file("Holiday.JPG", b"jpeg-bytes");
+        let song_path = temp_file("encore.flac", b"flac-bytes");
+        let photo = server.offer(&photo_path).unwrap();
+        let song = server.offer(&song_path).unwrap();
+
+        // Both the type we announce and the one spelled out in the address.
+        assert_eq!(photo.mime, "image/jpeg");
+        assert_eq!(song.mime, "audio/flac");
+        assert_eq!(
+            photo.url_for("192.168.0.42", server.port()).unwrap(),
+            format!("http://192.168.0.42:{}/m/{}.jpg", server.port(), photo.id),
+            "an uppercase extension is lowercased, not dropped"
+        );
+        assert_eq!(
+            song.url_for("192.168.0.42", server.port()).unwrap(),
+            format!("http://192.168.0.42:{}/m/{}.flac", server.port(), song.id)
+        );
+
+        // The suffixed address still resolves: the id is what precedes the
+        // extension, and the Content-Type is the registered one.
+        let (head, body) = request(&format!("/m/{}.jpg", photo.id), &[], store(server.files()));
+        let head = String::from_utf8_lossy(&head).into_owned();
+        assert!(head.starts_with("HTTP/1.1 200 OK"), "{head}");
+        assert!(head.contains("Content-Type: image/jpeg"), "{head}");
+        assert_eq!(body, b"jpeg-bytes");
+
+        server.stop();
+        std::fs::remove_file(&photo_path).ok();
+        std::fs::remove_file(&song_path).ok();
+    }
+
+    #[test]
+    fn an_extension_that_cannot_live_in_a_url_is_cleaned_rather_than_encoded() {
+        assert_eq!(suffix_of(Path::new("/x/clip.mp4")), ".mp4");
+        assert_eq!(suffix_of(Path::new("/x/noext")), "");
+        // Spaces and punctuation cannot appear bare in a path segment.
+        assert_eq!(suffix_of(Path::new("/x/tour.a b!c")), ".abc");
+        assert_eq!(suffix_of(Path::new("/x/tour.abcdefghij")), ".abcdefgh");
+        // A trailing dot has no extension at all.
+        assert_eq!(suffix_of(Path::new("/x/tour.")), "");
     }
 
     #[test]

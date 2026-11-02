@@ -508,7 +508,9 @@ fn wait_for(label: &str, mut done: impl FnMut() -> bool) {
     panic!("timed out waiting for {label}");
 }
 
-fn temp_video(name: &str) -> PathBuf {
+/// A file of the size the fake player expects, under whatever name is asked
+/// for: the extension is what the cast is being checked on here.
+fn temp_media(name: &str) -> PathBuf {
     let mut path = std::env::temp_dir();
     path.push(format!("aerosend-e2e-{}-{name}", std::process::id()));
     let bytes: Vec<u8> = (0..FILE_SIZE).map(|i| pattern(i)).collect();
@@ -545,7 +547,7 @@ fn a_local_file_casts_and_the_renderer_pulls_the_bytes_it_asked_for() {
     assert_eq!(control, format!("http://127.0.0.1:{port}"));
 
     // 2. Offer a real file and cast it.
-    let path = temp_video("clip.mp4");
+    let path = temp_media("clip.mp4");
     let offered = caster.offer(id, &path).expect("offering should work");
     assert_eq!(offered.size, FILE_SIZE as u64);
     assert_eq!(offered.mime, "video/mp4");
@@ -668,6 +670,62 @@ fn a_local_file_casts_and_the_renderer_pulls_the_bytes_it_asked_for() {
 
     caster.shutdown();
     std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn a_photo_and_a_song_cast_as_themselves_and_are_pulled_back_whole() {
+    let (port, device) = spawn_device();
+    let caster = Caster::new();
+    let id = "uuid:fake-dmr-1";
+    caster
+        .add_by_location(&format!("127.0.0.1:{port}"))
+        .expect("the fake device is reachable");
+
+    for (name, class, mime) in [
+        ("Holiday.JPG", "object.item.imageItem.photo", "image/jpeg"),
+        ("encore.flac", "object.item.audioItem.musicTrack", "audio/flac"),
+    ] {
+        let before = device.lock().unwrap().reads.len();
+        let path = temp_media(name);
+        let status = caster
+            .cast_file(id, &path)
+            .unwrap_or_else(|e| panic!("casting {name} should be accepted: {e}"));
+
+        // The address says what the file is, and so does the DIDL.
+        let extension = name.rsplit('.').next().unwrap().to_ascii_lowercase();
+        assert!(
+            status.uri.ends_with(&format!(".{extension}")),
+            "a receiver that reads only the URI has to see the type: {}",
+            status.uri
+        );
+        wait_for("SetAVTransportURI to arrive", || {
+            device.lock().unwrap().uri == status.uri
+        });
+        let metadata = device.lock().unwrap().metadata.clone();
+        assert!(metadata.contains(class), "{name}: {metadata}");
+        assert!(
+            metadata.contains(&format!(r#"protocolInfo="http-get:*:{mime}:*""#)),
+            "{name}: {metadata}"
+        );
+
+        // The suffixed address is served, with the bytes intact — the extension
+        // is a label, not a second file.
+        wait_for("the three ranged reads of the item", || {
+            device.lock().unwrap().reads.len() >= before + 3
+        });
+        let (reads, errors) = {
+            let guard = device.lock().unwrap();
+            (guard.reads[before..].to_vec(), guard.errors.clone())
+        };
+        assert!(errors.is_empty(), "{errors:?}");
+        for read in &reads {
+            assert_eq!(read.1, "206", "{} answered {}", read.0, read.1);
+            assert!(read.4.is_none(), "{}: {:?}", read.0, read.4);
+        }
+        std::fs::remove_file(&path).ok();
+    }
+
+    caster.shutdown();
 }
 
 #[test]

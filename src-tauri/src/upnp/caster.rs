@@ -521,34 +521,36 @@ impl Caster {
     }
 
     fn size_of(&self, uri: &str) -> Option<u64> {
+        let id = served_id(uri)?;
         let guard = self.media.lock().unwrap();
         let server = guard.as_ref()?;
         server
             .files()
             .iter()
-            .find(|f| uri.ends_with(&format!("/m/{}", f.id)))
+            .find(|f| f.id == id)
             .map(|f| f.size)
     }
 
     /// The MIME to announce for a URI in DIDL-Lite.
     ///
-    /// A file we serve is addressed by id (`/m/45bd36a3`) and carries no
-    /// extension, so the registered file has to answer: reading the extension of
-    /// that URL would tell a renderer `application/octet-stream` for its own MP4
-    /// and strict devices refuse or miscue such an item.
+    /// A file we serve is addressed by an id we minted (`/m/45bd36a3.mkv`); the
+    /// extension on it is decoration for the receiver, and the registered file
+    /// is the authority — a device that renamed the clip would otherwise be
+    /// trusted over the bytes we actually have.
     fn mime_for(&self, uri: &str) -> String {
-        let registered = self
-            .media
-            .lock()
-            .unwrap()
-            .as_ref()
-            .and_then(|server| {
-                server
-                    .files()
-                    .iter()
-                    .find(|f| uri.ends_with(&format!("/m/{}", f.id)))
-                    .map(|f| f.mime.clone())
-            });
+        let registered = served_id(uri).and_then(|id| {
+            self.media
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|server| {
+                    server
+                        .files()
+                        .iter()
+                        .find(|f| f.id == id)
+                        .map(|f| f.mime.clone())
+                })
+        });
         registered.unwrap_or_else(|| mime_of(uri))
     }
 
@@ -694,6 +696,17 @@ fn mime_of(uri: &str) -> String {
     crate::upnp::media_server::mime_from_extension(uri)
 }
 
+/// The media-server id inside a URI we minted, or `None` for any other address.
+///
+/// The advertised URL is `/m/<id>.<ext>` — the extension is there so a receiver
+/// that reads only the address can tell a photo from a film — so the id is what
+/// precedes the first dot, query or fragment.
+fn served_id(uri: &str) -> Option<&str> {
+    let rest = uri.split("/m/").nth(1)?;
+    let id = rest.split(['?', '#', '.']).next().unwrap_or("");
+    (!id.is_empty()).then_some(id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -733,19 +746,32 @@ mod tests {
 
     #[test]
     fn a_served_file_is_announced_with_its_real_type() {
-        // The served URL is `/m/<id>`, so an extension reading alone would name
-        // an MP4 `application/octet-stream` and a strict TV would refuse it.
+        // The served URL is `/m/<id>.<ext>`: the extension is a hint for a
+        // receiver that reads only the address, and the registered file stays
+        // the authority on what the bytes are.
         let caster = Caster::new();
         let path = temp_media_file("mime.mp4");
         let served = caster.ensure_media_server().unwrap();
         let file = served.offer(&path).unwrap();
         let url = file.url_for("192.168.0.9", served.port()).unwrap();
+        assert!(url.ends_with(&format!("/m/{}.mp4", file.id)), "{url}");
         assert_eq!(caster.mime_for(&url), "video/mp4");
         assert_eq!(caster.size_of(&url), Some(file.size));
         // A URL from somewhere else still gets the extension reading.
         assert_eq!(caster.mime_for("http://h/stream.mkv"), "video/x-matroska");
         assert_eq!(caster.size_of("http://h/stream.mkv"), None);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_served_id_survives_the_extension_and_a_query_a_device_adds() {
+        assert_eq!(served_id("http://h:1/m/45bd36a3.jpg"), Some("45bd36a3"));
+        assert_eq!(served_id("http://h:1/m/45bd36a3"), Some("45bd36a3"));
+        assert_eq!(served_id("http://h:1/m/45bd36a3.mp4?x=1"), Some("45bd36a3"));
+        assert_eq!(served_id("http://h:1/m/45bd36a3.mp4#t=10"), Some("45bd36a3"));
+        // Not ours: no id to look up, so the caller reads the extension instead.
+        assert_eq!(served_id("http://h/files/a.mkv"), None);
+        assert_eq!(served_id("http://h/m/"), None);
     }
 
     /// A real file on disk: the media server reads its length and extension, so

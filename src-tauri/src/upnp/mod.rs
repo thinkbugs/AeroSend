@@ -1,4 +1,4 @@
-//! UPnP AV: casting a video or audio file to a DLNA renderer.
+//! UPnP AV: casting a video, a photo or a song to a media renderer.
 //!
 //! The AirPlay path in `stream` encodes live pixels; this path does the
 //! opposite — the file leaves untouched and the renderer pulls it over HTTP
