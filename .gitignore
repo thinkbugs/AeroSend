@@ -2,5 +2,6 @@ node_modules/
 dist/
 target/
 *.exe
+*.log
 .DS_Store
 Thumbs.db
