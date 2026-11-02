@@ -6,55 +6,73 @@ interface StreamViewProps {
 }
 
 export default function StreamView({ device, stats }: StreamViewProps) {
+  // RAOP is the speaker transport; a manual address has no advertised video
+  // capability either. Both go out as audio only.
+  const audioOnly = stats?.audioOnly ?? device.type === "raop";
+
   return (
     <div className="stream-view">
       <div className="stream-header">
         <div className="stream-title">
           <span className="live-dot" />
-          <h2>Streaming to {device.name}</h2>
+          <h2>
+            {audioOnly ? "正在投送声音到" : "正在镜像到"} {device.name}
+          </h2>
         </div>
         <div className="stream-target">{device.host}:{device.port}</div>
       </div>
 
       <div className="stream-stats stream-stats-grid">
+        {!audioOnly && (
+          <>
+            <div className="stat-item">
+              <span className="stat-label">帧率</span>
+              <span className="stat-value">{formatNumber(stats?.fps)}</span>
+            </div>
+            <div className="stat-item">
+              <span className="stat-label">延迟</span>
+              <span className="stat-value">{stats ? `${stats.latency.toFixed(0)} ms` : "--"}</span>
+            </div>
+            <div className="stat-item">
+              <span className="stat-label">分辨率</span>
+              <span className="stat-value">{stats?.resolution ?? "--"}</span>
+            </div>
+          </>
+        )}
         <div className="stat-item">
-          <span className="stat-label">FPS</span>
-          <span className="stat-value">{formatNumber(stats?.fps)}</span>
-        </div>
-        <div className="stat-item">
-          <span className="stat-label">Bitrate</span>
+          <span className="stat-label">码率</span>
           <span className="stat-value">
             {stats ? `${stats.bitrate.toFixed(1)} Mbps` : "--"}
           </span>
         </div>
         <div className="stat-item">
-          <span className="stat-label">Latency</span>
-          <span className="stat-value">{stats ? `${stats.latency.toFixed(0)} ms` : "--"}</span>
-        </div>
-        <div className="stat-item">
-          <span className="stat-label">Resolution</span>
-          <span className="stat-value">{stats?.resolution ?? "--"}</span>
-        </div>
-        <div className="stat-item">
-          <span className="stat-label">Duration</span>
+          <span className="stat-label">时长</span>
           <span className="stat-value">
             {stats ? formatDuration(stats.duration) : "--:--"}
           </span>
         </div>
+        {!audioOnly && (
+          <>
+            <div className="stat-item">
+              <span className="stat-label">已采集帧</span>
+              <span className="stat-value">{formatCount(stats?.framesCaptured)}</span>
+            </div>
+            <div className="stat-item">
+              <span className="stat-label">丢帧</span>
+              <span className="stat-value">{formatCount(stats?.framesDropped)}</span>
+            </div>
+            <div className="stat-item">
+              <span className="stat-label">网络丢帧</span>
+              <span className="stat-value">{formatCount(stats?.framesStalled)}</span>
+            </div>
+          </>
+        )}
         <div className="stat-item">
-          <span className="stat-label">Frames captured</span>
-          <span className="stat-value">{formatCount(stats?.framesCaptured)}</span>
-        </div>
-        <div className="stat-item">
-          <span className="stat-label">Dropped</span>
-          <span className="stat-value">{formatCount(stats?.framesDropped)}</span>
-        </div>
-        <div className="stat-item">
-          <span className="stat-label">Audio frames</span>
+          <span className="stat-label">音频帧</span>
           <span className="stat-value">{formatCount(stats?.audioFramesSent)}</span>
         </div>
         <div className="stat-item">
-          <span className="stat-label">Sent</span>
+          <span className="stat-label">已发送</span>
           <span className="stat-value">
             {stats ? `${(stats.bytesSent / 1_000_000).toFixed(1)} MB` : "--"}
           </span>
@@ -62,10 +80,13 @@ export default function StreamView({ device, stats }: StreamViewProps) {
       </div>
 
       <div className="stream-transport">
-        <span className="stat-label">Transport</span>
-        <span>{stats?.codec ?? "H.264 / AAC"}</span>
+        <span className="stat-label">传输</span>
+        <span>{stats?.codec ?? (audioOnly ? "L16 / 44.1 kHz" : "H.264")}</span>
         <span className="muted">
-          RTP/UDP with RTCP sender reports · screen captured with DXGI, audio with WASAPI loopback
+          RTP/UDP + RTCP 发送端报告 ·{" "}
+          {audioOnly
+            ? "系统声音由 WASAPI 回环采集"
+            : "屏幕由 DXGI 采集，声音由 WASAPI 回环采集"}
         </span>
       </div>
     </div>

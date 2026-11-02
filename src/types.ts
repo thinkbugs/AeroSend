@@ -17,10 +17,14 @@ export interface StreamStats {
   latency: number;
   resolution: string;
   codec: string;
+  /** The session is an AirPlay speaker cast and has no video side. */
+  audioOnly: boolean;
   duration: number;
   framesCaptured: number;
   /** Capture ticks skipped because the encoder had not drained its backlog. */
   framesDropped: number;
+  /** Pictures the receiver did not take in time, so they were dropped. */
+  framesStalled: number;
   bytesSent: number;
   audioFramesSent: number;
   running: boolean;

@@ -28,7 +28,7 @@ export default function App() {
   useEffect(() => {
     invoke("start_discovery")
       .then(() => setScanning(true))
-      .catch((e) => setError(`Discovery failed: ${e}`));
+      .catch((e) => setError(`设备发现失败：${e}`));
     return () => {
       invoke("stop_discovery").catch(() => undefined);
     };
@@ -91,7 +91,7 @@ export default function App() {
         setStreamStats(stats);
         if (!stats.running) {
           setState("error");
-          setError(stats.error ?? "The stream ended.");
+          setError(stats.error ?? "投屏会话已结束。");
         }
       } catch {
         // Ignore one failed read; the next tick retries.
@@ -120,7 +120,7 @@ export default function App() {
       setSelectedDevice(device);
       setState("streaming");
     } catch (e) {
-      setError(`Connection failed: ${e}`);
+      setError(`连接失败：${e}`);
       setState("error");
     }
   }
@@ -132,7 +132,7 @@ export default function App() {
       setSelectedDevice(null);
       setStreamStats(null);
     } catch (e) {
-      setError(`Disconnect failed: ${e}`);
+      setError(`断开连接失败：${e}`);
     }
   }
 
@@ -143,7 +143,7 @@ export default function App() {
         : await invoke<AnnotationState>("start_annotation");
       setAnnotation(next);
     } catch (e) {
-      setError(`Annotation failed: ${e}`);
+      setError(`启动批注失败：${e}`);
     }
   }
 
@@ -154,7 +154,7 @@ export default function App() {
       });
       setAnnotation(next);
     } catch (e) {
-      setError(`Could not change the pointer lock: ${e}`);
+      setError(`切换鼠标穿透失败：${e}`);
     }
   }
 

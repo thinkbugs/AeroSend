@@ -31,7 +31,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       const loaded = await invoke<StreamSettings>("get_stream_settings");
       set({ settings: loaded, settingsLoaded: true, settingsError: null });
     } catch (e) {
-      set({ settingsError: `Could not read settings: ${e}`, settingsLoaded: true });
+      set({ settingsError: `读取设置失败：${e}`, settingsLoaded: true });
     }
   },
 
@@ -41,7 +41,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
     try {
       await invoke("set_stream_settings", { settings: next });
     } catch (e) {
-      set({ settingsError: `Not saved: ${e}` });
+      set({ settingsError: `保存失败：${e}` });
     }
   },
 

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { Device } from "../types";
+import { deviceTypeLabel } from "../labels";
 
 interface DashboardProps {
   devices: Device[];
@@ -37,7 +38,7 @@ export default function Dashboard({ devices, onSelectDevice, onRescan }: Dashboa
     <div className="dashboard">
       <div className="dashboard-hero">
         <h1>AeroSend</h1>
-        <p>Professional AirPlay Sender for Windows</p>
+        <p>面向 Windows 的 AirPlay 投屏工具</p>
         <div className="hero-actions">
           <button className="btn-primary" onClick={onRescan}>
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -46,7 +47,7 @@ export default function Dashboard({ devices, onSelectDevice, onRescan }: Dashboa
               <path d="M3 22v-6h6" />
               <path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
             </svg>
-            Scan for Devices
+            扫描设备
           </button>
         </div>
       </div>
@@ -61,7 +62,7 @@ export default function Dashboard({ devices, onSelectDevice, onRescan }: Dashboa
           </div>
           <div className="stat-info">
             <span className="stat-value">{devices.length}</span>
-            <span className="stat-label">Devices Found</span>
+            <span className="stat-label">已发现设备</span>
           </div>
         </div>
 
@@ -73,8 +74,8 @@ export default function Dashboard({ devices, onSelectDevice, onRescan }: Dashboa
             </svg>
           </div>
           <div className="stat-info">
-            <span className="stat-value">Ready</span>
-            <span className="stat-label">System Status</span>
+            <span className="stat-value">就绪</span>
+            <span className="stat-label">系统状态</span>
           </div>
         </div>
 
@@ -88,7 +89,7 @@ export default function Dashboard({ devices, onSelectDevice, onRescan }: Dashboa
           </div>
           <div className="stat-info">
             <span className="stat-value">H.264</span>
-            <span className="stat-label">Video Codec</span>
+            <span className="stat-label">视频编码</span>
           </div>
         </div>
 
@@ -103,32 +104,32 @@ export default function Dashboard({ devices, onSelectDevice, onRescan }: Dashboa
           </div>
           <div className="stat-info">
             <span className="stat-value">AirPlay</span>
-            <span className="stat-label">Protocol</span>
+            <span className="stat-label">投屏协议</span>
           </div>
         </div>
       </div>
 
       <div className="manual-device-section">
-        <h2>Add Device Manually</h2>
-        <p className="section-desc">Enter the IP address of an AirPlay receiver on your network.</p>
+        <h2>手动添加设备</h2>
+        <p className="section-desc">输入局域网内 AirPlay 接收端的 IP 地址。</p>
         <div className="manual-device-form">
           <input
             type="text"
-            placeholder="IP Address (e.g. 192.168.1.100)"
+            placeholder="IP 地址（例如 192.168.1.100）"
             value={manualHost}
             onChange={(e) => setManualHost(e.target.value)}
             className="form-input"
           />
           <input
             type="number"
-            placeholder="Port"
+            placeholder="端口"
             value={manualPort}
             onChange={(e) => setManualPort(e.target.value)}
             className="form-input form-input-sm"
           />
           <input
             type="text"
-            placeholder="Name (optional)"
+            placeholder="名称（可选）"
             value={manualName}
             onChange={(e) => setManualName(e.target.value)}
             className="form-input"
@@ -138,14 +139,14 @@ export default function Dashboard({ devices, onSelectDevice, onRescan }: Dashboa
             onClick={handleAddManual}
             disabled={adding || !manualHost.trim()}
           >
-            {adding ? "Adding..." : "Add"}
+            {adding ? "添加中…" : "添加"}
           </button>
         </div>
       </div>
 
       {devices.length > 0 && (
         <div className="device-grid-section">
-          <h2>Available Devices</h2>
+          <h2>可用设备</h2>
           <div className="device-grid">
             {devices.map((device) => (
               <button
@@ -162,7 +163,7 @@ export default function Dashboard({ devices, onSelectDevice, onRescan }: Dashboa
                 <div className="device-card-info">
                   <span className="device-card-name">{device.name}</span>
                   <span className="device-card-detail">
-                    {device.host}:{device.port} · {device.type.toUpperCase()}
+                    {device.host}:{device.port} · {deviceTypeLabel(device.type)}
                   </span>
                 </div>
                 <div className="device-card-action">

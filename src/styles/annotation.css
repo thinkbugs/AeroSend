@@ -32,6 +32,18 @@ body {
   display: block;
   touch-action: none;
   cursor: crosshair;
+  /* Only the top sheet takes the pointer; the layers below never need it. */
+  pointer-events: none;
+}
+
+/* The highlighter is drawn opaque on its own sheet and made translucent once,
+   by the compositor, so crossing strokes do not stack into a darker blob. */
+.annotate-marker {
+  opacity: 0.35;
+}
+
+.annotate-preview {
+  pointer-events: auto;
 }
 
 .annotate-root.locked .annotate-canvas {
