@@ -1,6 +1,7 @@
 node_modules/
 dist/
 target/
+.vite/
 *.exe
 *.log
 .DS_Store
